@@ -29,10 +29,12 @@ int main(int argc,char *argv[]){
             unmapped++;
             continue;
         }
-//        uint8_t *umi_tag= bam_aux_get(aln,"RX");
 
+
+//        std::cout << "length"<<read_length<< " average quality: " << avg_qual << std::endl;
         cout<<"read name:"<<extractUMI(bam_get_qname(b),sep)<<endl;
-        if (i==100){
+
+        if (i==10){
             break;
         }
         i++;
@@ -64,4 +66,19 @@ std::string extractUMI(const std::string& readName, char sep) {
 
     // 提取分隔符后的部分，即 UMI
     return readName.substr(sepPos + 1);  // `sepPos + 1` 是跳过分隔符字符
+}
+/**
+ * 获取平均质量分数，原版就是int，可以考虑换为float提高精度
+ * @param b
+ * @return
+ */
+int get_avg_qual(bam1_t* b){
+    uint8_t *qual= bam_get_qual(b);
+    int read_length=b->core.l_qseq;
+    long sum_qual=0;
+    for (int j = 0; j < read_length; ++j) {
+        sum_qual+=qual[j];
+    }
+    int avg_qual = (sum_qual) / read_length;
+    return avg_qual;
 }
