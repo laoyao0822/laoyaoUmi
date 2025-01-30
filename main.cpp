@@ -8,15 +8,55 @@
 #include <bitset>
 #include <string>
 #include <stdexcept>
+#include <unordered_map>
 using namespace std;
-
+int get_avg_qual(bam1_t* b);
 // Initialize the static member
 std::string extractUMI(const std::string& readName, char sep);
 int get_unclipped_start(bam1_t *b) ;
 int get_unclipped_end(bam1_t *b);
 
 const char* get_reference_name(bam1_t *b, sam_hdr_t *header);
+/**
+ * 表示位置的结构体
+ */
+struct Alignment {
+    bool isReversed;
+    int pos;
+    string refName;
+    bool operator==(const Alignment &other) const {
+        return isReversed == other.isReversed && pos == other.pos && refName == other.refName;
+    }
+};
+// ReadFreq 结构体
+struct ReadFreq {
+    int freq;
+    bam1_t* b;
+    ReadFreq() : freq(0), b(nullptr) {}
 
+    //int score;
+    ReadFreq(bam1_t* b)  {
+        this->freq=1;
+        this->b=b;
+    }
+    void merge(bam1_t* b2){
+        if (get_avg_qual(b2)> get_avg_qual(b)){
+            this->b=b2;
+        }
+        freq++;
+    }
+
+};
+
+// Hash 函数
+namespace std {
+    template <>
+    struct hash<Alignment> {
+        size_t operator()(const Alignment &a) const {
+            return hash<string>()(a.refName) ^ hash<int>()(a.pos) ^ hash<bool>()(a.isReversed);
+        }
+    };
+}
 int main(int argc,char *argv[]){
     samFile *bam_in= sam_open(argv[1],"r");
     cout<<argv[1]<<endl;
@@ -28,6 +68,7 @@ int main(int argc,char *argv[]){
     char sep='_';
     int i=1;
     int unmapped=0;
+    unordered_map<Alignment, unordered_map<string , ReadFreq>> align;
     while (sam_read1(bam_in,bam_header,b)>=0){
         //判断是否是无效印迹
         if (b->core.flag&BAM_FUNMAP){
@@ -35,37 +76,26 @@ int main(int argc,char *argv[]){
             continue;
         }
         bool readNegativeFlag=b->core.flag&BAM_FREVERSE;
-//        if (!readNegativeFlag) {
-//            cout << "negative flag " << readNegativeFlag << endl;
-//            cout<<"clip pos"<<get_unclipped_start(b)<<endl;
-//            cout<<i<<endl;
-////        std::cout << "length"<<read_length<< " average quality: " << avg_qual << std::endl;
-////            cout << "read name: " << extractUMI(bam_get_qname(b), sep) << endl;
-//        }
-//        cout << "negative flag " << readNegativeFlag << endl;
-//        if (readNegativeFlag){
-//            cout << "clip pos; " << get_unclipped_end(b) << endl;
-//        }else{
-//            cout << "clip pos: " << get_unclipped_start(b) << endl;
-//        }
-//        cout<<"ref name"<<get_reference_name(b,bam_header)<<endl;
-        if (strcmp(get_reference_name(b,bam_header),"1")!=0){
-            cout << "negative flag " << readNegativeFlag << endl;
-            if (readNegativeFlag){
-                cout << "clip pos; " << get_unclipped_end(b) << endl;
-            }else{
-                cout << "clip pos: " << get_unclipped_start(b) << endl;
-            }
-            cout<<"ref name"<<get_reference_name(b,bam_header)<<endl;
-            cout<<i<<endl;
-            break;
+        string q_name= bam_get_qname(b);
+        string umi= extractUMI(q_name,sep);
+        Alignment alignment{readNegativeFlag,
+                            (readNegativeFlag ? get_unclipped_end(b) : get_unclipped_start(b)),
+                            get_reference_name(b,bam_header)};
+
+        // 确保对齐位置已存在
+        if (!align.count(alignment)) {
+            align[alignment] = unordered_map<string, ReadFreq>();
         }
 
-        if (i==50000000){
-            break;
+        // 处理 UMI 计数
+        auto &umiMap = align[alignment];
+
+        if (umiMap.count(umi)) {
+            umiMap[umi].merge(b);
+        } else {
+            umiMap[umi] = ReadFreq(b);
         }
         i++;
-
 
     }
     cout<<"sum is "<<i<<",cost time:"<<omp_get_wtime()-start_time<<endl;
@@ -133,7 +163,7 @@ int get_unclipped_start(bam1_t *b) {
 }
 /**
  * 获取未裁剪的末尾，用于确定位置
- * 已验证，与原版相比大小-1
+ * 已验证
  * @param b
  * @return
  */
@@ -156,6 +186,7 @@ int get_unclipped_end(bam1_t *b) {
 }
 /**
  * 获取引用名称，大部分为1，用于确定位置
+ * 已验证
  * @param b
  * @param header
  * @return
