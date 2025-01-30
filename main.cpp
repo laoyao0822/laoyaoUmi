@@ -9,6 +9,7 @@
 #include <string>
 #include <stdexcept>
 #include <unordered_map>
+#include <vector>
 using namespace std;
 int get_avg_qual(bam1_t* b);
 // Initialize the static member
@@ -58,23 +59,34 @@ namespace std {
     };
 }
 int main(int argc,char *argv[]){
+    omp_set_num_threads(20);
+
     samFile *bam_in= sam_open(argv[1],"r");
     cout<<argv[1]<<endl;
     sam_hdr_t *bam_header= sam_hdr_read(bam_in);
     hts_set_threads(bam_in,20);
-    bam1_t *b=bam_init1();
+
     double start_time,end_time;
     start_time=omp_get_wtime();
     char sep='_';
-    int i=1;
+    int read_count=0;
     int unmapped=0;
     unordered_map<Alignment, unordered_map<string , ReadFreq>> align;
-    while (sam_read1(bam_in,bam_header,b)>=0){
+    vector<bam1_t*>b_array(100000000);
+//    vector<bam1_t*>header_array(100000000);
+    while (true){
+        bam1_t *b=bam_init1();
+        if (sam_read1(bam_in,bam_header,b<=0){
+            break;
+        }
+        b_array[read_count]=b;
+//        header_array[i]=bam_header;
         //判断是否是无效印迹
         if (b->core.flag&BAM_FUNMAP){
             unmapped++;
             continue;
         }
+
         bool readNegativeFlag=b->core.flag&BAM_FREVERSE;
         string q_name= bam_get_qname(b);
         string umi= extractUMI(q_name,sep);
@@ -90,19 +102,39 @@ int main(int argc,char *argv[]){
         // 处理 UMI 计数
         auto &umiMap = align[alignment];
 
-        if (umiMap.count(umi)) {
-            umiMap[umi].merge(b);
-        } else {
-            umiMap[umi] = ReadFreq(b);
+        auto [iter, inserted] = umiMap.emplace(umi, b);
+        if (!inserted) {
+            iter->second.merge(b);
         }
-        i++;
-
+        if (read_count==100){
+            cout<<"13000000 "<<endl;
+            cout<<"13000000 align map"<<align.size()<<endl;
+            cout<<"cost time"<<omp_get_wtime()-start_time<<endl;
+            break;
+        }
+        read_count++;
     }
-    cout<<"sum is "<<i<<",cost time:"<<omp_get_wtime()-start_time<<endl;
+    cout<<"map is over"<<endl;
     cout<<"unmapped number:"<<unmapped<<endl;
-    bam_destroy1(b);
+    unsigned int alignPosCount = align.size();
+    unsigned int avgUMICount = 0,maxUMICount = 0,dedupedCount = 0;
+    vector<std::pair<Alignment, unordered_map<string , ReadFreq>>> entries(align.begin(),align.end());
+//    #pragma omp parallel for schedule(dynamic)
+    for (unsigned int i = 0; i < entries.size(); ++ji) {
+        auto& [ali, umiMap]=entries[i];
+        for (auto& [umi, readFreq]:umiMap) {
+//            cout<<"reduce umi: "<<umi<<endl;
+//            cout<<get_avg_qual(readFreq.b)<<endl;
+        }
+    }
+//    bam_destroy1(b);
+    #pragma omp parallel for
+    for (int i = 0; i < read_count; ++i) {
+        free(b_array[i]);
+    }
     bam_hdr_destroy(bam_header);
     sam_close(bam_in);
+    cout<<"sum is "<<read_count<<",cost time:"<<omp_get_wtime()-start_time<<endl;
 //    hts_idx_destroy();
 }
 
