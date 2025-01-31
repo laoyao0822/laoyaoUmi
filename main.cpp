@@ -10,12 +10,28 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
+#include <bitset>
 using namespace std;
+
+vector<bam1_t*>b_array(140000000);
+using umi_type=bitset<64>  ;
 int get_avg_qual(bam1_t* b);
 // Initialize the static member
-std::string extractUMI(const std::string& readName, char sep);
+umi_type extractUMI(const std::string& readName, char sep);
 int get_unclipped_start(bam1_t *b) ;
 int get_unclipped_end(bam1_t *b);
+//a,c,g,t之间的编码不同的位数都是2
+const int ENCODING_DIST=2;
+const std::unordered_map<char, uint8_t> ENCODING_MAP{
+        {'A', 0b000},
+        {'T', 0b101},
+        {'C', 0b110},
+        {'G', 0b011},
+        {'a', 0b000},
+        {'b', 0b101},
+        {'c', 0b110},
+        {'g', 0b011}
+};
 
 const char* get_reference_name(bam1_t *b, sam_hdr_t *header);
 /**
@@ -32,16 +48,16 @@ struct Alignment {
 // ReadFreq 结构体
 struct ReadFreq {
     int freq;
-    bam1_t* b;
-    ReadFreq() : freq(0), b(nullptr) {}
+    unsigned int b;
+    ReadFreq() : freq(0), b(0) {}
 
     //int score;
-    ReadFreq(bam1_t* b)  {
+    ReadFreq(unsigned int b)  {
         this->freq=1;
         this->b=b;
     }
-    void merge(bam1_t* b2){
-        if (get_avg_qual(b2)> get_avg_qual(b)){
+    void merge(unsigned int b2){
+        if (get_avg_qual(b_array[b2])> get_avg_qual(b_array[this->b])){
             this->b=b2;
         }
         freq++;
@@ -59,24 +75,25 @@ namespace std {
     };
 }
 int main(int argc,char *argv[]){
-    omp_set_num_threads(20);
+    omp_set_num_threads(50);
 
     samFile *bam_in= sam_open(argv[1],"r");
     cout<<argv[1]<<endl;
     sam_hdr_t *bam_header= sam_hdr_read(bam_in);
-    hts_set_threads(bam_in,20);
+    hts_set_threads(bam_in,50);
 
     double start_time,end_time;
     start_time=omp_get_wtime();
     char sep='_';
-    int read_count=0;
+    unsigned int read_count=0;
     int unmapped=0;
-    unordered_map<Alignment, unordered_map<string , ReadFreq>> align;
-    vector<bam1_t*>b_array(100000000);
+    unordered_map<Alignment, unordered_map<umi_type , ReadFreq>> align;
+//    vector<bam1_t*>b_array(100000000);
 //    vector<bam1_t*>header_array(100000000);
+//    bam1_t *b=bam_init1();
     while (true){
         bam1_t *b=bam_init1();
-        if (sam_read1(bam_in,bam_header,b<=0){
+        if (sam_read1(bam_in,bam_header,b)<0){
             break;
         }
         b_array[read_count]=b;
@@ -89,52 +106,58 @@ int main(int argc,char *argv[]){
 
         bool readNegativeFlag=b->core.flag&BAM_FREVERSE;
         string q_name= bam_get_qname(b);
-        string umi= extractUMI(q_name,sep);
+        umi_type umi= extractUMI(q_name,sep);
         Alignment alignment{readNegativeFlag,
                             (readNegativeFlag ? get_unclipped_end(b) : get_unclipped_start(b)),
                             get_reference_name(b,bam_header)};
 
+
         // 确保对齐位置已存在
         if (!align.count(alignment)) {
-            align[alignment] = unordered_map<string, ReadFreq>();
+            align[alignment] = unordered_map<umi_type, ReadFreq>();
         }
-
+//        cout<<get_unclipped_start(b)<<endl;
         // 处理 UMI 计数
         auto &umiMap = align[alignment];
 
-        auto [iter, inserted] = umiMap.emplace(umi, b);
+        auto [iter, inserted] = umiMap.emplace(umi, read_count);
         if (!inserted) {
-            iter->second.merge(b);
+            iter->second.merge(read_count);
         }
-        if (read_count==100){
-            cout<<"13000000 "<<endl;
-            cout<<"13000000 align map"<<align.size()<<endl;
-            cout<<"cost time"<<omp_get_wtime()-start_time<<endl;
-            break;
-        }
+
+
         read_count++;
     }
     cout<<"map is over"<<endl;
     cout<<"unmapped number:"<<unmapped<<endl;
+    cout<<"map over,cost time:"<<omp_get_wtime()-start_time<<endl;
     unsigned int alignPosCount = align.size();
     unsigned int avgUMICount = 0,maxUMICount = 0,dedupedCount = 0;
-    vector<std::pair<Alignment, unordered_map<string , ReadFreq>>> entries(align.begin(),align.end());
-//    #pragma omp parallel for schedule(dynamic)
-    for (unsigned int i = 0; i < entries.size(); ++ji) {
+    vector<std::pair<Alignment, unordered_map<umi_type , ReadFreq>>> entries(align.begin(),align.end());
+
+    #pragma omp parallel for schedule(dynamic)
+    for (unsigned int i = 0; i < entries.size(); ++i) {
         auto& [ali, umiMap]=entries[i];
-        for (auto& [umi, readFreq]:umiMap) {
-//            cout<<"reduce umi: "<<umi<<endl;
-//            cout<<get_avg_qual(readFreq.b)<<endl;
-        }
+        vector<int>deduped(umiMap.size());
+        vector<pair<umi_type,ReadFreq>> freqs(umiMap.begin(),umiMap.end());
+        sort(freqs.begin(), freqs.end(),
+             [](const pair<umi_type, ReadFreq>& a, const pair<umi_type, ReadFreq>& b) {
+                 return a.second.freq > b.second.freq;  // 降序排序
+             }
+        );
+
     }
 //    bam_destroy1(b);
+    cout<<"sum is "<<read_count<<",cost time:"<<omp_get_wtime()-start_time<<endl;
     #pragma omp parallel for
     for (int i = 0; i < read_count; ++i) {
-        free(b_array[i]);
+        bam_destroy1(b_array[i]);
     }
     bam_hdr_destroy(bam_header);
     sam_close(bam_in);
-    cout<<"sum is "<<read_count<<",cost time:"<<omp_get_wtime()-start_time<<endl;
+//    free(b_array);
+    cout<<"close and destroy,cost time:"<<omp_get_wtime()-start_time<<endl;
+    return 0;
 //    hts_idx_destroy();
 }
 
@@ -145,17 +168,37 @@ int main(int argc,char *argv[]){
  * @param sep umi分格符
  * @return
  */
-std::string extractUMI(const std::string& readName, char sep) {
+umi_type extractUMI(const std::string& readName, char sep) {
+    umi_type result;
     // 找到分隔符的位置
-    size_t sepPos = readName.find(sep);
-
-    // 如果找不到分隔符，返回空字符串
+    int sepPos = readName.find(sep);
+    int bit_pos=0;
+//    // 如果找不到分隔符，返回空字符串
     if (sepPos == std::string::npos) {
-        return "";
+        return result;
     }
+    string umi_str=readName.substr(sepPos + 1);  // `sepPos + 1` 是跳过分隔符字符
+//    cout<<"umi: "<<umi_str<<endl;
+
+    for (const char c : umi_str) {
+        const auto it = ENCODING_MAP.find(c);
+        if (it == ENCODING_MAP.end()) {
+            return result;  // 遇到無效字符返回空bitset
+        }
+
+        const uint8_t code = it->second;
+        // 將3bit編碼按高位到低位依次寫入bitset
+        for (int shift = 2; shift >= 0; --shift) {
+            if (bit_pos >= result.size()) {
+                return result;  // 超過最大長度時截斷
+            }
+            result.set(bit_pos++, (code >> shift) & 0x1);
+        }
+    }
+//    cout<<"umi bitset: "<<result.to_string()<<endl;
 
     // 提取分隔符后的部分，即 UMI
-    return readName.substr(sepPos + 1);  // `sepPos + 1` 是跳过分隔符字符
+    return result;
 }
 /**
  * 获取平均质量分数，原版就是int，可以考虑换为float提高精度
@@ -234,4 +277,7 @@ const char* get_reference_name(bam1_t *b, sam_hdr_t *header) {
 
     // 使用 BAM 文件头来获取参考名称
     return header->target_name[reference_index];
+}
+int umi_dist(bitset<64> &a,bitset<64>& b){
+    return (a^b).count()/2;
 }
