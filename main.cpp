@@ -19,7 +19,8 @@ using namespace std;
 vector<bam1_t*>b_array(140000000);
 //using umi_type=bitset<64>  ;
 using umi_type=string  ;
-int get_avg_qual(bam1_t* b);
+using score_type=int;
+score_type get_avg_qual(bam1_t* b);
 // Initialize the static member
 umi_type extractUMI(const std::string& readName, char sep);
 int64_t get_unclipped_start(bam1_t *b) ;
@@ -56,16 +57,19 @@ struct Alignment {
 struct ReadFreq {
     int freq;
     unsigned int b;
+    score_type score=0;
     ReadFreq() : freq(0), b(0) {}
 
     //int score;
-    ReadFreq(unsigned int b)  {
+    ReadFreq(unsigned int b,score_type score)  {
         this->freq=1;
         this->b=b;
+        this->score=score;
     }
-    void merge(unsigned int b2){
-        if (get_avg_qual(b_array[b2])> get_avg_qual(b_array[this->b])){
+    void merge(unsigned int b2,score_type b2_score){
+        if (b2_score > this->score){
             this->b=b2;
+            this->score=b2_score;
         }
         freq++;
     }
@@ -81,7 +85,7 @@ namespace std {
         }
     };
 }
-unordered_set<umi_type> near(const vector<pair<umi_type,ReadFreq>>& freqs,umi_type umi,int k, int maxFreq);
+unordered_set<umi_type> near(const vector<pair<umi_type,ReadFreq*>>& freqs,umi_type umi,int k, int maxFreq);
 void visitAndRemove(const umi_type & u,unordered_map<umi_type, unordered_set<umi_type>>& adj,
                     unordered_set<umi_type>& visited);
 unsigned long umi_dist(umi_type &a,umi_type& b);
@@ -91,7 +95,7 @@ int main(int argc,char *argv[]){
 //    string a="AAGNA";
 //    string b="ATGTA";
 //    cout<<"umi dist "<<umi_dist(a,b)<<endl;
-    omp_set_num_threads(50);
+    omp_set_num_threads(2);
     double percentage = 0.5f;
 //    samFile *bam_in= sam_open("/root/input/SRR23538291.mRNA.genome.mapped.sorted.bam","r");
 //    htsFile *bam_out= hts_open("/root/input/outputSRR23538290.mRNA.genome.mapped.sorted.dedup.bam","wb");
@@ -117,16 +121,34 @@ int main(int argc,char *argv[]){
     int k=1;
     unsigned int read_count=0;
     int unmapped=0;
-    unordered_map<Alignment, unordered_map<umi_type , ReadFreq>> align;
+    unsigned int total_read_count=0;
+    unordered_map<Alignment, unordered_map<umi_type , ReadFreq*>> align;
 //    vector<bam1_t*>b_array(100000000);
 //    vector<bam1_t*>header_array(100000000);
 //    bam1_t *b=bam_init1();
-    while (true){
+    #pragma omp parallel reduction(+:read_count) reduction(+:unmapped)
+    {
+        bool continue_flag= true;
+        unsigned int p_read_count=0;
+    while (continue_flag){
         bam1_t *b=bam_init1();
-        if (sam_read1(bam_in,bam_header,b)<0){
+
+        #pragma omp critical
+        {
+            if (sam_read1(bam_in, bam_header, b) <0) {
+                continue_flag= false;
+            } else{
+                cout<<"one thread read ok"<<endl;
+                total_read_count++;
+                p_read_count=total_read_count;
+            }
+        }
+        if (!continue_flag){
+            bam_destroy1(b);
             break;
         }
-        b_array[read_count]=b;
+        p_read_count--;
+        b_array[p_read_count]=b;
 //        header_array[i]=bam_header;
         //判断是否是无效印迹
         if (b->core.flag&BAM_FUNMAP){
@@ -138,81 +160,74 @@ int main(int argc,char *argv[]){
         string q_name= bam_get_qname(b);
         umi_type umi= extractUMI(q_name,sep);
 //        cout<<q_name<<endl;
+        //获取这条记录的位置
         Alignment alignment{readNegativeFlag,
                             (readNegativeFlag ? get_unclipped_end(b) : get_unclipped_start(b)),
                             get_reference_name(b,bam_header)};
-//        string umi_s=umi.to_string();
-//        reverse(umi_s.begin(),umi_s.end());
-//        cout<<"umi"<<umi_s<<endl;
-
+        //获取这条记录的质量分数
+        score_type score= get_avg_qual(b);
+        #pragma omp critical
+        {
         // 确保对齐位置已存在
-        if (!align.count(alignment)) {
-            align[alignment] = unordered_map<umi_type, ReadFreq>();
-        }
-//        cout<<get_unclipped_start(b)<<endl;
+            if (!align.count(alignment)) {
+                align[alignment] = unordered_map<umi_type, ReadFreq *>();
+            }
+
+
         // 处理 UMI 计数
         auto &umiMap = align[alignment];
-
-        auto [iter, inserted] = umiMap.emplace(umi, read_count);
-        if (!inserted) {
-            iter->second.merge(read_count);
+        auto it_read = umiMap.find(umi);
+        if (it_read != umiMap.end()) {
+            it_read->second->merge(p_read_count, score);
+        } else {
+            umiMap.insert({umi, new ReadFreq(p_read_count, score)});
+        }
         }
 
-//        if (read_count==30000){
-////            cout<<q_name<<endl;
-////            cout<<umi.to_string()<<endl;
-////            exit(0);
-//            break;
-//        }
         read_count++;
     }
+    }
+    cout<<"total read count"<<endl;
     cout<<"map is over"<<endl;
     cout<<"unmapped number:"<<unmapped<<endl;
     cout<<"map over,cost time:"<<omp_get_wtime()-start_time<<endl;
 
     unsigned int alignPosCount = align.size();
     unsigned int avgUMICount = 0,maxUMICount = 0,dedupedCount = 0;
-    vector<std::pair<Alignment, unordered_map<umi_type , ReadFreq>>> entries(align.begin(),align.end());
+    vector<std::pair<Alignment, unordered_map<umi_type , ReadFreq*>>> entries(align.begin(),align.end());
     int count_time=0;
     int f_count_time=0;
     int u_count_time=0;
-    #pragma omp parallel for schedule(dynamic) reduction(+:dedupedCount,avgUMICount) reduction(max:maxUMICount)
+    omp_set_num_threads(40);
+
+#pragma omp parallel for schedule(dynamic) reduction(+:dedupedCount,avgUMICount) reduction(max:maxUMICount)
     for (unsigned int i = 0; i < entries.size(); ++i) {
         auto& [ali, umiMap]=entries[i];
-        vector<ReadFreq>deduped;
+        vector<ReadFreq*>deduped;
         //读取并按频率排序
-        vector<pair<umi_type,ReadFreq>> freqs(umiMap.begin(),umiMap.end());
+        vector<pair<umi_type,ReadFreq*>> freqs(umiMap.begin(),umiMap.end());
 //
         sort(freqs.begin(), freqs.end(),
-             [](const pair<umi_type, ReadFreq>& a, const pair<umi_type, ReadFreq>& b) {
-                 return a.second.freq > b.second.freq;  // 降序排序
+             [](const pair<umi_type, ReadFreq*>& a, const pair<umi_type, ReadFreq*>& b) {
+                 return a.second->freq > b.second->freq;  // 降序排序
              }
         );
 
         //构建邻链接边
         vector<unordered_set<umi_type>>adjIdx(freqs.size());
         unordered_map<umi_type,unordered_set<umi_type>>adj;
-        int near_number=0;
+//        int near_number=0;
         if (freqs.size()==17){
 
         }
 
         for (int j = 0; j < freqs.size(); ++j) {
-//            cout<<"freq:"<<freqs[j].second.freq<<endl;
-//            cout<<"umi:"<<freqs[j].first.to_string()<<endl;
             adj[freqs[j].first]= near(freqs,freqs[j].first,k,
-                            static_cast<int>((freqs[j].second.freq+1)*percentage));
-            near_number+=adj[freqs[j].first].size();
-//            if (freqs.size()==17){
-//                cout<<"freq:"<<freqs[j].second.freq<<endl;
-//                cout<<"umi:"<<freqs[j].first.to_string()<<endl;
-////                cout << "adj one out  " << adj[freqs[j].first].size() << endl;
-//            }
+                            static_cast<int>((freqs[j].second->freq+1)*percentage));
+//            near_number+=adj[freqs[j].first].size();
         }
 
-//        if (freqs.size()==17||freqs.size()==16) {
-//            cout << "near size   " << near_number << endl;
-//        }
+
         unordered_set<umi_type>visited;
 
         for(const auto& freq : freqs){
@@ -236,8 +251,8 @@ int main(int argc,char *argv[]){
         //处理完成
         #pragma omp critical
         {
-            for(ReadFreq readFreq:deduped){
-                if (sam_write1(bam_out,bam_header,b_array[readFreq.b])<0){
+            for(ReadFreq* readFreq:deduped){
+                if (sam_write1(bam_out,bam_header,b_array[readFreq->b])<0){
                     cerr << "Error writing output." << endl;
                     exit(-1);
                 }
@@ -320,7 +335,7 @@ umi_type extractUMI(const std::string& readName, char sep) {
  * @param b
  * @return
  */
-int get_avg_qual(bam1_t* b){
+score_type get_avg_qual(bam1_t* b){
     uint8_t *qual= bam_get_qual(b);
     int read_length=b->core.l_qseq;
     long sum_qual=0;
@@ -405,19 +420,16 @@ unsigned long umi_dist(umi_type &a,umi_type& b){
     }
     return result;
 }
-unordered_set<umi_type> near(const vector<pair<umi_type,ReadFreq>>& freqs,umi_type umi,int k, int maxFreq){
+unordered_set<umi_type> near(const vector<pair<umi_type,ReadFreq*>>& freqs,umi_type umi,int k, int maxFreq){
     unordered_set<umi_type>res;
     for (auto & freq : freqs) {
         umi_type o=freq.first;
-        int f=freq.second.freq;
+        int f=freq.second->freq;
         unsigned long dist= umi_dist(umi,o);
         if (dist<=k&&(dist==0||f<=maxFreq)){
             res.insert(o);
         }
     }
-//    if (!res.empty()) {
-//        cout << "near size " << res.size() << endl;
-//    }
     return res;
 
 }
