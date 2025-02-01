@@ -176,7 +176,7 @@ int main(int argc,char *argv[]){
     int count_time=0;
     int f_count_time=0;
     int u_count_time=0;
-//    #pragma omp parallel for schedule(dynamic) reduction(+:dedupedCount,avgUMICount) reduction(max:maxUMICount)
+    #pragma omp parallel for schedule(dynamic) reduction(+:dedupedCount,avgUMICount) reduction(max:maxUMICount)
     for (unsigned int i = 0; i < entries.size(); ++i) {
         auto& [ali, umiMap]=entries[i];
         vector<ReadFreq>deduped;
