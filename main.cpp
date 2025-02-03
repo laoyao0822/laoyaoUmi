@@ -14,9 +14,9 @@
 //#include <cstring>
 #include <algorithm>
 #include "htslib/thread_pool.h"
+#include <unistd.h>
 using namespace std;
 
-vector<bam1_t*>b_array(140000000);
 //using umi_type=bitset<64>  ;
 using umi_type=string  ;
 using score_type=int;
@@ -25,7 +25,12 @@ score_type get_avg_qual(bam1_t* b);
 umi_type extractUMI(const std::string& readName, char sep);
 int64_t get_unclipped_start(bam1_t *b) ;
 int64_t get_unclipped_end(bam1_t *b);
-
+constexpr size_t POOL_SIZE = 135000000;
+int unmapped=0;
+const unsigned int CHUNK_SIZE=1000000;
+alignas(64) unsigned int total_read_count=0;
+bam1_t *** b_array;
+char sep='_';
 //a,c,g,t之间的编码不同的位数都是2
 const int ENCODING_DIST=2;
 const std::unordered_map<char, uint8_t> ENCODING_MAP{
@@ -34,11 +39,6 @@ const std::unordered_map<char, uint8_t> ENCODING_MAP{
         {'C', 0b110},
         {'G', 0b011},
         {'N', 0b100},
-        {'a', 0b000},
-        {'t', 0b101},
-        {'c', 0b110},
-        {'g', 0b011},
-        {'n', 0b100}
 };
 
 const char* get_reference_name(bam1_t *b, sam_hdr_t *header);
@@ -85,17 +85,24 @@ namespace std {
         }
     };
 }
+unordered_map<Alignment, unordered_map<umi_type , ReadFreq*>> alignmentMap;
 unordered_set<umi_type> near(const vector<pair<umi_type,ReadFreq*>>& freqs,umi_type umi,int k, int maxFreq);
 void visitAndRemove(const umi_type & u,unordered_map<umi_type, unordered_set<umi_type>>& adj,
                     unordered_set<umi_type>& visited);
 unsigned long umi_dist(umi_type &a,umi_type& b);
+unsigned int mapSection(sam_hdr_t *bam_header,unsigned int start,unsigned int end);
+bam1_t* getBam1_t(unsigned index){
+    return b_array[index/CHUNK_SIZE-1][index%CHUNK_SIZE];
+}
+
+//bam1_t *bam_initV2(void)
+//{
+//    return (bam1_t*)malloc( sizeof(bam1_t));
+//}
+
 int main(int argc,char *argv[]){
-//    bitset<64>a(0b101);
-//    bitset<64>b(0b000);
-//    string a="AAGNA";
-//    string b="ATGTA";
-//    cout<<"umi dist "<<umi_dist(a,b)<<endl;
-    omp_set_num_threads(2);
+    b_array=(bam1_t***) malloc(sizeof (bam1_t**)*CHUNK_SIZE);
+    omp_set_num_threads(30);
     double percentage = 0.5f;
 //    samFile *bam_in= sam_open("/root/input/SRR23538291.mRNA.genome.mapped.sorted.bam","r");
 //    htsFile *bam_out= hts_open("/root/input/outputSRR23538290.mRNA.genome.mapped.sorted.dedup.bam","wb");
@@ -108,7 +115,7 @@ int main(int argc,char *argv[]){
     }
     cout<<argv[1]<<endl;
     htsThreadPool tpool = {NULL, 0};
-    tpool.pool = hts_tpool_init(30);
+    tpool.pool = hts_tpool_init(50);
     if (tpool.pool) {
         hts_set_opt(bam_in, HTS_OPT_THREAD_POOL, &tpool);
         hts_set_opt(bam_out, HTS_OPT_THREAD_POOL, &tpool);
@@ -117,87 +124,71 @@ int main(int argc,char *argv[]){
 //    hts_set_threads(bam_out,20);
     double start_time,end_time;
     start_time=omp_get_wtime();
-    char sep='_';
     int k=1;
+
     unsigned int read_count=0;
-    int unmapped=0;
-    unsigned int total_read_count=0;
-    unordered_map<Alignment, unordered_map<umi_type , ReadFreq*>> align;
-//    vector<bam1_t*>b_array(100000000);
-//    vector<bam1_t*>header_array(100000000);
-//    bam1_t *b=bam_init1();
-    #pragma omp parallel reduction(+:read_count) reduction(+:unmapped)
+    alignas(64) bool init_done=false;
+#pragma omp parallel sections num_threads(2)
     {
-        bool continue_flag= true;
-        unsigned int p_read_count=0;
-    while (continue_flag){
-        bam1_t *b=bam_init1();
-
-        #pragma omp critical
+        //初始化读入内存
+        #pragma omp section
         {
-            if (sam_read1(bam_in, bam_header, b) <0) {
-                continue_flag= false;
-            } else{
-                cout<<"one thread read ok"<<endl;
-                total_read_count++;
-                p_read_count=total_read_count;
+            cout << "bam init over,cost time:" << omp_get_wtime() - start_time << endl;
+            unsigned int p_read=0;
+            while (true) {
+                b_array[total_read_count+p_read] = bam_init1();
+                if (sam_read1(bam_in, bam_header, b_array[total_read_count+p_read]) < 0) {
+                    //执行完成
+                    #pragma omp atomic
+                    init_done+=1;
+                    #pragma omp atomic
+                    total_read_count+=p_read;
+                    bam_destroy1(b_array[total_read_count]);
+                    cout << "init vector over,cost time:" << omp_get_wtime() - start_time << endl;
+                    cout<<total_read_count<<endl;
+                    break;
+                }
+                p_read++;
+                //每一定间隔发送数据
+                if (p_read%500000==0) {
+                    #pragma omp atomic
+                    total_read_count+=p_read;
+                    p_read=0;
+                }
             }
         }
-        if (!continue_flag){
-            bam_destroy1(b);
-            break;
-        }
-        p_read_count--;
-        b_array[p_read_count]=b;
-//        header_array[i]=bam_header;
-        //判断是否是无效印迹
-        if (b->core.flag&BAM_FUNMAP){
-            unmapped++;
-            continue;
-        }
-
-        bool readNegativeFlag=b->core.flag&BAM_FREVERSE;
-        string q_name= bam_get_qname(b);
-        umi_type umi= extractUMI(q_name,sep);
-//        cout<<q_name<<endl;
-        //获取这条记录的位置
-        Alignment alignment{readNegativeFlag,
-                            (readNegativeFlag ? get_unclipped_end(b) : get_unclipped_start(b)),
-                            get_reference_name(b,bam_header)};
-        //获取这条记录的质量分数
-        score_type score= get_avg_qual(b);
-        #pragma omp critical
+        //
+        #pragma omp section
         {
-        // 确保对齐位置已存在
-            if (!align.count(alignment)) {
-                align[alignment] = unordered_map<umi_type, ReadFreq *>();
+            usleep(2000000);
+            unsigned int current_read=0;
+            unsigned int toread=0;
+        //进入第一步map阶段
+            while (true) {
+                #pragma omp atomic read
+                toread=total_read_count;
+                read_count += mapSection(bam_header,current_read,toread);
+                current_read=toread;
+                //不再有新的，处理完剩余的退出
+                if (init_done) {
+                    read_count+= mapSection(bam_header,current_read,total_read_count);
+                    break;
+                }
             }
-
-
-        // 处理 UMI 计数
-        auto &umiMap = align[alignment];
-        auto it_read = umiMap.find(umi);
-        if (it_read != umiMap.end()) {
-            it_read->second->merge(p_read_count, score);
-        } else {
-            umiMap.insert({umi, new ReadFreq(p_read_count, score)});
         }
-        }
+    }
+//    exit(0);
+//    #pragma omp parallel for reduction(+:read_count) reduction(+:unmapped)
+    cout<<"total read count"<<total_read_count<<endl;
 
-        read_count++;
-    }
-    }
-    cout<<"total read count"<<endl;
     cout<<"map is over"<<endl;
     cout<<"unmapped number:"<<unmapped<<endl;
     cout<<"map over,cost time:"<<omp_get_wtime()-start_time<<endl;
 
-    unsigned int alignPosCount = align.size();
+    unsigned int alignPosCount = alignmentMap.size();
     unsigned int avgUMICount = 0,maxUMICount = 0,dedupedCount = 0;
-    vector<std::pair<Alignment, unordered_map<umi_type , ReadFreq*>>> entries(align.begin(),align.end());
-    int count_time=0;
-    int f_count_time=0;
-    int u_count_time=0;
+    vector<std::pair<Alignment, unordered_map<umi_type , ReadFreq*>>> entries(alignmentMap.begin(), alignmentMap.end());
+
     omp_set_num_threads(40);
 
 #pragma omp parallel for schedule(dynamic) reduction(+:dedupedCount,avgUMICount) reduction(max:maxUMICount)
@@ -217,10 +208,6 @@ int main(int argc,char *argv[]){
         vector<unordered_set<umi_type>>adjIdx(freqs.size());
         unordered_map<umi_type,unordered_set<umi_type>>adj;
 //        int near_number=0;
-        if (freqs.size()==17){
-
-        }
-
         for (int j = 0; j < freqs.size(); ++j) {
             adj[freqs[j].first]= near(freqs,freqs[j].first,k,
                             static_cast<int>((freqs[j].second->freq+1)*percentage));
@@ -236,15 +223,6 @@ int main(int argc,char *argv[]){
                 deduped.push_back(freq.second);
             }
         }
-//        cout<<"umiMap size: "<<umiMap.size()<<endl;
-//        cout<<" dedup size: "<< deduped.size()<<endl;
-
-//        if (deduped.size()>50&&deduped.size()<=55){
-//            count_time++;
-//            cout<<" freq size "<< freqs.size()<<" : "<<count_time<<endl;
-//            cout << "near size   " << near_number << endl;
-//            cout<<" dedup size: "<< deduped.size()<<" : "<<count_time<<endl;
-//        }
         avgUMICount += umiMap.size();
         maxUMICount = std::max(maxUMICount, (unsigned int)umiMap.size());
         dedupedCount += deduped.size();
@@ -258,7 +236,6 @@ int main(int argc,char *argv[]){
                 }
             }
         }
-
     }
 //    bam_destroy1(b);
     cout<<"sum is "<<read_count<<",cost time:"<<omp_get_wtime()-start_time<<endl;
@@ -268,7 +245,7 @@ int main(int argc,char *argv[]){
     cout<<"Max number of UMIs over all alignment positions\t" << maxUMICount<<endl;
     cout<<"Number of reads after deduplicating\t" << dedupedCount<<endl;
     #pragma omp parallel for
-    for (int i = 0; i < read_count; ++i) {
+    for (int i = 0; i < total_read_count; ++i) {
         bam_destroy1(b_array[i]);
     }
     bam_hdr_destroy(bam_header);
@@ -281,7 +258,49 @@ int main(int argc,char *argv[]){
     return 0;
 //    hts_idx_destroy();
 }
-
+/**
+ * map阶段，将所有位置，umi相同的记录聚合到一起
+ * @param bam_header
+ * @return
+ */
+unsigned int mapSection(sam_hdr_t *bam_header,unsigned int start,unsigned int end){
+    int read_count=0;
+    for (int p_read_count = start; p_read_count < end; ++p_read_count) {
+        bam1_t* b=b_array[p_read_count];
+        //判断是否是无效印迹s
+        if (b->core.flag&BAM_FUNMAP){
+            unmapped++;
+            continue;
+        }
+        bool readNegativeFlag=b->core.flag&BAM_FREVERSE;
+        string q_name= bam_get_qname(b);
+        umi_type umi= extractUMI(q_name,sep);
+//        cout<<q_name<<endl;
+        //获取这条记录的位置
+        Alignment alignment{readNegativeFlag,
+                            (readNegativeFlag ? get_unclipped_end(b) : get_unclipped_start(b)),
+                            get_reference_name(b,bam_header)};
+        //获取这条记录的质量分数
+        score_type score= get_avg_qual(b);
+        #pragma omp critical
+        {
+            // 确保对齐位置已存在
+            if (!alignmentMap.count(alignment)) {
+                alignmentMap[alignment] = unordered_map<umi_type, ReadFreq *>();
+            }
+            // 处理 UMI 计数
+            auto &umiMap = alignmentMap[alignment];
+            auto it_read = umiMap.find(umi);
+            if (it_read != umiMap.end()) {
+                it_read->second->merge(p_read_count, score);
+            } else {
+                umiMap.insert({umi, new ReadFreq(p_read_count, score)});
+            }
+        }
+        read_count++;
+    }
+    return read_count;
+}
 /**
  * 从read_name/q_name中提取umi
  * 已验证，结果相同
