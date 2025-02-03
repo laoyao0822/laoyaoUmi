@@ -25,10 +25,10 @@ score_type get_avg_qual(bam1_t* b);
 umi_type extractUMI(const std::string& readName, char sep);
 int64_t get_unclipped_start(bam1_t *b) ;
 int64_t get_unclipped_end(bam1_t *b);
-constexpr size_t POOL_SIZE = 135000000;
 int unmapped=0;
 const unsigned int CHUNK_SIZE=1000000;
 alignas(64) unsigned int total_read_count=0;
+alignas(64) unsigned int chunk_N=0;
 bam1_t *** b_array;
 char sep='_';
 //a,c,g,t之间的编码不同的位数都是2
@@ -90,9 +90,9 @@ unordered_set<umi_type> near(const vector<pair<umi_type,ReadFreq*>>& freqs,umi_t
 void visitAndRemove(const umi_type & u,unordered_map<umi_type, unordered_set<umi_type>>& adj,
                     unordered_set<umi_type>& visited);
 unsigned long umi_dist(umi_type &a,umi_type& b);
-unsigned int mapSection(sam_hdr_t *bam_header,unsigned int start,unsigned int end);
+unsigned int mapSectionChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned int read_size);
 bam1_t* getBam1_t(unsigned index){
-    return b_array[index/CHUNK_SIZE-1][index%CHUNK_SIZE];
+    return b_array[index/CHUNK_SIZE][index%CHUNK_SIZE];
 }
 
 //bam1_t *bam_initV2(void)
@@ -104,8 +104,6 @@ int main(int argc,char *argv[]){
     b_array=(bam1_t***) malloc(sizeof (bam1_t**)*CHUNK_SIZE);
     omp_set_num_threads(30);
     double percentage = 0.5f;
-//    samFile *bam_in= sam_open("/root/input/SRR23538291.mRNA.genome.mapped.sorted.bam","r");
-//    htsFile *bam_out= hts_open("/root/input/outputSRR23538290.mRNA.genome.mapped.sorted.dedup.bam","wb");
     samFile *bam_in= sam_open(argv[1],"r");
     htsFile *bam_out= hts_open(argv[2],"wb");
     sam_hdr_t *bam_header= sam_hdr_read(bam_in);
@@ -135,25 +133,33 @@ int main(int argc,char *argv[]){
         {
             cout << "bam init over,cost time:" << omp_get_wtime() - start_time << endl;
             unsigned int p_read=0;
+            auto ** b_array_local= (bam1_t** )malloc(CHUNK_SIZE*sizeof(bam1_t*));
             while (true) {
-                b_array[total_read_count+p_read] = bam_init1();
-                if (sam_read1(bam_in, bam_header, b_array[total_read_count+p_read]) < 0) {
+                bam1_t* b= bam_init1();
+                if (sam_read1(bam_in, bam_header, b) < 0) {
                     //执行完成
+                    total_read_count+=p_read;
+                    b_array[chunk_N]=b_array_local;
                     #pragma omp atomic
                     init_done+=1;
                     #pragma omp atomic
-                    total_read_count+=p_read;
-                    bam_destroy1(b_array[total_read_count]);
+                    chunk_N++;
+                    bam_destroy1(b);
                     cout << "init vector over,cost time:" << omp_get_wtime() - start_time << endl;
                     cout<<total_read_count<<endl;
                     break;
                 }
+                b_array_local[p_read]=b;
                 p_read++;
                 //每一定间隔发送数据
-                if (p_read%500000==0) {
+                if (p_read%CHUNK_SIZE==0) {
+                    //将这块数据放入
+                    b_array[chunk_N]=b_array_local;
+                    total_read_count+=CHUNK_SIZE;
                     #pragma omp atomic
-                    total_read_count+=p_read;
+                    chunk_N++;
                     p_read=0;
+                    b_array_local=(bam1_t** )malloc(sizeof(bam1_t*)*CHUNK_SIZE);
                 }
             }
         }
@@ -161,19 +167,30 @@ int main(int argc,char *argv[]){
         #pragma omp section
         {
             usleep(2000000);
-            unsigned int current_read=0;
-            unsigned int toread=0;
+            unsigned int current_n=0;
+            unsigned int toN=0;
         //进入第一步map阶段
             while (true) {
                 #pragma omp atomic read
-                toread=total_read_count;
-                read_count += mapSection(bam_header,current_read,toread);
-                current_read=toread;
-                //不再有新的，处理完剩余的退出
+                toN=chunk_N;
+                if (toN==current_n){
+                    usleep(1000);
+                    continue;
+                }
                 if (init_done) {
-                    read_count+= mapSection(bam_header,current_read,total_read_count);
+                    cout<<"init done"<<endl;
+                    for (unsigned int i = current_n; i < toN-1; ++i) {
+                        read_count+= mapSectionChunk(bam_header,i,CHUNK_SIZE);
+                    }
+                    cout<<"the last one done"<<total_read_count<<":"<<(total_read_count-1)%CHUNK_SIZE+1<<endl;
+                    read_count+=mapSectionChunk(bam_header,toN-1,(total_read_count-1)%CHUNK_SIZE+1);
                     break;
                 }
+                for (unsigned int i = current_n; i < toN; ++i) {
+                    read_count+= mapSectionChunk(bam_header,i, CHUNK_SIZE);
+                }
+                current_n=toN;
+                //不再有新的，处理完剩余的退出
             }
         }
     }
@@ -230,7 +247,7 @@ int main(int argc,char *argv[]){
         #pragma omp critical
         {
             for(ReadFreq* readFreq:deduped){
-                if (sam_write1(bam_out,bam_header,b_array[readFreq->b])<0){
+                if (sam_write1(bam_out,bam_header, getBam1_t(readFreq->b))<0){
                     cerr << "Error writing output." << endl;
                     exit(-1);
                 }
@@ -245,8 +262,15 @@ int main(int argc,char *argv[]){
     cout<<"Max number of UMIs over all alignment positions\t" << maxUMICount<<endl;
     cout<<"Number of reads after deduplicating\t" << dedupedCount<<endl;
     #pragma omp parallel for
-    for (int i = 0; i < total_read_count; ++i) {
-        bam_destroy1(b_array[i]);
+    for (int i = 0; i < chunk_N; ++i) {
+        unsigned int last=CHUNK_SIZE;
+        if (i==CHUNK_SIZE-1){
+            last=total_read_count%CHUNK_SIZE;
+        }
+        bam1_t ** to_destroy=b_array[i];
+        for (int j = 0; j < last; ++j) {
+            bam_destroy1(to_destroy[j]);
+        }
     }
     bam_hdr_destroy(bam_header);
     sam_close(bam_in);
@@ -258,15 +282,20 @@ int main(int argc,char *argv[]){
     return 0;
 //    hts_idx_destroy();
 }
-/**
- * map阶段，将所有位置，umi相同的记录聚合到一起
- * @param bam_header
- * @return
- */
-unsigned int mapSection(sam_hdr_t *bam_header,unsigned int start,unsigned int end){
+
+ /**
+  * map阶段，将所有位置，umi相同的记录聚合到一起,处理一个Chunk
+  * @param bam_header 头
+  * @param chunk_n 处理第几快
+  * @param read_size 处理多少个，一般为CHUNK
+  * @return
+  */
+unsigned int mapSectionChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned int read_size){
     int read_count=0;
-    for (int p_read_count = start; p_read_count < end; ++p_read_count) {
-        bam1_t* b=b_array[p_read_count];
+    unsigned int current_pos=CHUNK_SIZE*chunk_n;
+    bam1_t** chunk=b_array[chunk_n];
+    for (int p_read_count = 0; p_read_count <read_size; ++p_read_count) {
+        bam1_t* b=chunk[p_read_count];
         //判断是否是无效印迹s
         if (b->core.flag&BAM_FUNMAP){
             unmapped++;
@@ -292,9 +321,9 @@ unsigned int mapSection(sam_hdr_t *bam_header,unsigned int start,unsigned int en
             auto &umiMap = alignmentMap[alignment];
             auto it_read = umiMap.find(umi);
             if (it_read != umiMap.end()) {
-                it_read->second->merge(p_read_count, score);
+                it_read->second->merge(current_pos+p_read_count, score);
             } else {
-                umiMap.insert({umi, new ReadFreq(p_read_count, score)});
+                umiMap.insert({umi, new ReadFreq(current_pos+p_read_count, score)});
             }
         }
         read_count++;
