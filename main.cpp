@@ -11,18 +11,18 @@
 #include <vector>
 #include <unordered_set>
 #include <algorithm>
-//#include <cstring>
-#include <algorithm>
 #include "htslib/thread_pool.h"
 #include <unistd.h>
+#include <list>
 using namespace std;
 
 //using umi_type=bitset<64>  ;
 using umi_type=string  ;
 using score_type=int;
+using adj_type=vector<umi_type>;
 score_type get_avg_qual(bam1_t* b);
 // Initialize the static member
-umi_type extractUMI(const std::string& readName, char sep);
+umi_type extractUMI(const std::string& readName);
 int64_t get_unclipped_start(bam1_t *b) ;
 int64_t get_unclipped_end(bam1_t *b);
 int unmapped=0;
@@ -32,10 +32,13 @@ unsigned int avgUMICount ,maxUMICount,dedupedCount ;
 double percentage = 0.5f;
 //near的系数
 int k=1;
+bool read_done= false;
 const unsigned int CHUNK_SIZE=1000000;
 alignas(64) unsigned int total_read_count=0;
 alignas(64) unsigned int chunk_N=0;
 bam1_t *** b_array;
+bool* consumer_flags;
+
 char sep='_';
 //a,c,g,t之间的编码不同的位数都是2
 const int ENCODING_DIST=2;
@@ -81,20 +84,27 @@ struct ReadFreq {
     }
 
 };
+//用于向消费者传输数据
+vector<pair<Alignment , unsigned int >>* processor_datas;
 
 // Hash 函数
 namespace std {
     template <>
     struct hash<Alignment> {
         size_t operator()(const Alignment &a) const {
-            return hash<string>()(a.refName) ^ hash<int>()(a.pos) ^ hash<bool>()(a.isReversed);
+            return hash<string>()(a.refName) ^ hash<int64_t>()(a.pos) ^ hash<bool>()(a.isReversed);
         }
     };
 }
+size_t getHash(const Alignment& ali){
+    return hash<bool>()(!ali.isReversed)^hash<string>()(ali.refName) ^ hash<int64_t>()(ali.pos) ;
+}
 unordered_map<Alignment, unordered_map<umi_type , ReadFreq*>> alignmentMap;
-unordered_set<umi_type> near(const vector<pair<umi_type,ReadFreq*>>& freqs,umi_type umi,int k, int maxFreq);
+unordered_set<umi_type> near(const vector<pair<umi_type,ReadFreq*>>& freqs,const umi_type& umi, int maxFreq);
 void visitAndRemove(const umi_type & u,unordered_map<umi_type, unordered_set<umi_type>>& adj,
                     unordered_set<umi_type>& visited);
+void visitAndRemoveV2(const umi_type & u,
+                      unordered_map<umi_type, adj_type>& adj, unordered_set<umi_type>& visited);
 int umi_dist(const umi_type &a,const umi_type& b);
 unsigned int mapSectionChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned int read_size);
 vector<ReadFreq*> reduceOne(unordered_map<umi_type , ReadFreq*>& umiMap);
@@ -108,8 +118,12 @@ bam1_t* getBam1_t(unsigned index){
 //}
 
 int main(int argc,char *argv[]){
+    int num_of_consumer=35;
     b_array=(bam1_t***) malloc(sizeof (bam1_t**)*CHUNK_SIZE);
-    omp_set_num_threads(30);
+    consumer_flags= (bool *)calloc(num_of_consumer, sizeof(bool));
+    processor_datas= (vector<pair<Alignment , unsigned int >>*)
+            malloc(sizeof (vector<pair<Alignment , unsigned int >>)*num_of_consumer);
+    omp_set_num_threads(num_of_consumer);
     samFile *bam_in= sam_open(argv[1],"r");
     htsFile *bam_out= hts_open(argv[2],"wb");
     sam_hdr_t *bam_header= sam_hdr_read(bam_in);
@@ -126,7 +140,7 @@ int main(int argc,char *argv[]){
     }
 //    hts_set_threads(bam_in,20);
 //    hts_set_threads(bam_out,20);
-    double start_time,end_time;
+    double start_time;
     start_time=omp_get_wtime();
 
 
@@ -172,7 +186,7 @@ int main(int argc,char *argv[]){
         //
         #pragma omp section
         {
-            usleep(3000000);
+            usleep(4000000);
             unsigned int current_n=0;
             unsigned int toN=0;
         //进入第一步map阶段
@@ -180,7 +194,7 @@ int main(int argc,char *argv[]){
                 #pragma omp atomic read
                 toN=chunk_N;
                 if (toN==current_n){
-                    usleep(500000);
+                    usleep(100000);
                     continue;
                 }
                 if (init_done) {
@@ -220,7 +234,6 @@ int main(int argc,char *argv[]){
         avgUMICount += umiMap.size();
         maxUMICount = std::max(maxUMICount, (unsigned int)umiMap.size());
         dedupedCount += deduped.size();
-
         #pragma omp critical
         {
             for(ReadFreq* readFreq:deduped){
@@ -281,7 +294,7 @@ unsigned int mapSectionChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned
         }
         bool readNegativeFlag=b->core.flag&BAM_FREVERSE;
         string q_name= bam_get_qname(b);
-        umi_type umi= extractUMI(q_name,sep);
+        umi_type umi= extractUMI(q_name);
 //        cout<<q_name<<endl;
         //获取这条记录的位置
         Alignment alignment{readNegativeFlag,
@@ -308,11 +321,12 @@ unsigned int mapSectionChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned
     }
     return read_count;
 }
-void finalConsumer(Alignment& alignment,int pos){
-    unordered_map<Alignment, unordered_map<umi_type , ReadFreq*>> local_align;
+void consumeOne(const Alignment& alignment,unsigned int pos,
+                unordered_map<Alignment, unordered_map<umi_type , ReadFreq*>>& local_align,
+unordered_map<Alignment, unordered_map<umi_type,adj_type>>& align_adjs){
     bam1_t * b= getBam1_t(pos);
     string q_name= bam_get_qname(b);
-    umi_type umi= extractUMI(q_name,sep);
+    umi_type umi= extractUMI(q_name);
     score_type score= get_avg_qual(b);
 
     if (!alignmentMap.count(alignment)) {
@@ -321,22 +335,82 @@ void finalConsumer(Alignment& alignment,int pos){
     auto &umiMap = local_align[alignment];
     auto it_read = umiMap.find(umi);
     if (it_read != umiMap.end()) {
+        //原来就已经存在，保存质量最好的一条
         it_read->second->merge(pos,score );
     } else {
+        //原来不存在合并
         umiMap.insert({umi, new ReadFreq(pos, score)});
+        //将结果放入对应adj,根据dist筛选
+        unordered_map<umi_type,adj_type>adjs;
+        adj_type one_adj;
+        for (auto & iter : umiMap) {
+            int dist=umi_dist(iter.first,umi);
+            if (dist<k){
+                adjs[iter.first].push_back(umi);
+                one_adj.push_back(iter.first);
+            }
+        }
+        adjs[umi]=one_adj;
+        align_adjs[alignment]=adjs;
     }
+}
+void finalConsumer(){
 
+    #pragma omp parallel
+    {
+        int id = omp_get_thread_num();
+        unordered_map<Alignment, unordered_map<umi_type, ReadFreq *>> local_align;
+        unordered_map<Alignment, unordered_map<umi_type, adj_type>> align_adjs;
+        vector<unsigned int> poses;
+        vector<pair<Alignment , unsigned int >> process_data;
 
-    unordered_map<umi_type,unordered_set<umi_type>>adj;
+        //获取信号，表示有新的
+        while (true) {
+            if (consumer_flags[id]) {
+                process_data=processor_datas[id];
+                #pragma atomic
+                consumer_flags[id]-=1;
+                for (const auto &[ali, pos]: process_data) {
+                    consumeOne(ali, pos, local_align, align_adjs);
+                }
+            } else {
+                usleep(100);
+            }
+            if (read_done) {
+                //处理完成进入后处理阶段
+                for (auto &tackle_map: align_adjs) {
+                    unordered_map<umi_type, ReadFreq *> umi_read = local_align[tackle_map.first];
+                    //再次删除,根据freq删除
+                    for (auto &umi_adjs: tackle_map.second) {
+                        int maxFreq = static_cast<int>((umi_read[umi_adjs.first]->freq + 1) * percentage);
+                        adj_type to_remove = umi_adjs.second;
+                        for (auto it = to_remove.begin(); it != to_remove.end();) {
+                            if (umi_read[*it]->freq > maxFreq) {
+                                it = to_remove.erase(it);
+                            } else {
+                                it++;
+                            }
+                        }
+                    }
+                    unordered_set<umi_type> visited;
+                    vector<ReadFreq *> deduped;
+                    for (const auto &freq: umi_read) {
+                        if (visited.count(freq.first) == 0) {
+                            visitAndRemoveV2(freq.first, tackle_map.second, visited);
+                            deduped.push_back(freq.second);
+                        }
+                    }
+                    //开始写入
+                }
+                //处理完成退出线程
+                break;
 
-    for (auto iter=umiMap.begin();iter!=umiMap.end();iter++) {
-        int dist=umi_dist(iter->first,umi);
-
-
+            }
+        }
     }
-
 
 }
+
 /**
  * 对一条记录进行归约，去除其中频率低，相似的umi
  * @param umiMap
@@ -358,12 +432,10 @@ vector<ReadFreq*> reduceOne(unordered_map<umi_type , ReadFreq*>& umiMap){
     unordered_map<umi_type,unordered_set<umi_type>>adj;
 //        int near_number=0;
     for (int j = 0; j < freqs.size(); ++j) {
-        adj[freqs[j].first]= near(freqs,freqs[j].first,k,
+        adj[freqs[j].first]= near(freqs,freqs[j].first,
                                   static_cast<int>((freqs[j].second->freq+1)*percentage));
 //            near_number+=adj[freqs[j].first].size();
     }
-
-
     unordered_set<umi_type>visited;
 
     for(const auto& freq : freqs){
@@ -382,11 +454,10 @@ vector<ReadFreq*> reduceOne(unordered_map<umi_type , ReadFreq*>& umiMap){
  * @param sep umi分格符
  * @return
  */
-umi_type extractUMI(const std::string& readName, char sep) {
+umi_type extractUMI(const std::string& readName) {
     umi_type result;
     // 找到分隔符的位置
-    int sepPos = readName.find(sep);
-    int bit_pos=0;
+    unsigned long sepPos = readName.find(sep);
 //    // 如果找不到分隔符，返回空字符串
     if (sepPos == std::string::npos) {
         return result;
@@ -513,13 +584,17 @@ int umi_dist(const umi_type &a,const umi_type& b){
     }
     return result;
 }
-unordered_set<umi_type> near(const vector<pair<umi_type,ReadFreq*>>& freqs,umi_type umi,int k, int maxFreq){
+unordered_set<umi_type> near(const vector<pair<umi_type,ReadFreq*>>& freqs,const umi_type& umi, int maxFreq){
     unordered_set<umi_type>res;
     for (auto & freq : freqs) {
         umi_type o=freq.first;
         int f=freq.second->freq;
         int dist= umi_dist(umi,o);
-        if (dist<=k&&(dist==0||f<=maxFreq)){
+        if (dist<=k&&(f<=maxFreq)){
+            if (res.count(o)!=0){
+                cout<<" repeat!!!!!!!!!!!!"<<endl;
+            }
+
             res.insert(o);
         }
     }
@@ -539,3 +614,14 @@ void visitAndRemove(const umi_type & u,
     }
 }
 
+void visitAndRemoveV2(const umi_type & u,
+                     unordered_map<umi_type, adj_type>& adj, unordered_set<umi_type>& visited) {
+    if (visited.count(u)!=0) return;
+    // 获取邻接的节点
+    const auto& neighbors = adj[u];
+    visited.insert(u);
+    for (const auto& v : neighbors) {
+        if (u == v) continue;
+        visitAndRemoveV2(v, adj, visited);
+    }
+}
