@@ -216,34 +216,7 @@ int main(int argc,char *argv[]){
 //        auto& [ali, umiMap]=entries[i];
 //        vector<ReadFreq*>deduped=reduceOne(umiMap);
         auto& [ali, umiMap]=entries[i];
-        vector<ReadFreq*>deduped;
-        //读取并按频率排序
-        vector<pair<umi_type,ReadFreq*>> freqs(umiMap.begin(),umiMap.end());
-//
-        sort(freqs.begin(), freqs.end(),
-             [](const pair<umi_type, ReadFreq*>& a, const pair<umi_type, ReadFreq*>& b) {
-                 return a.second->freq > b.second->freq;  // 降序排序
-             }
-        );
-        //构建邻链接边
-//        vector<unordered_set<umi_type>>adjIdx(freqs.size());
-        unordered_map<umi_type,unordered_set<umi_type>>adj;
-//        int near_number=0;
-        for (int j = 0; j < freqs.size(); ++j) {
-            adj[freqs[j].first]= near(freqs,freqs[j].first,k,
-                                      static_cast<int>((freqs[j].second->freq+1)*percentage));
-//            near_number+=adj[freqs[j].first].size();
-        }
-
-
-        unordered_set<umi_type>visited;
-
-        for(const auto& freq : freqs){
-            if (visited.count(freq.first)==0){
-                visitAndRemove(freq.first,adj,visited);
-                deduped.push_back(freq.second);
-            }
-        }
+        vector<ReadFreq*>deduped= reduceOne(umiMap);
         avgUMICount += umiMap.size();
         maxUMICount = std::max(maxUMICount, (unsigned int)umiMap.size());
         dedupedCount += deduped.size();
@@ -374,14 +347,14 @@ vector<ReadFreq*> reduceOne(unordered_map<umi_type , ReadFreq*>& umiMap){
     vector<ReadFreq*>deduped;
     //读取并按频率排序
     vector<pair<umi_type,ReadFreq*>> freqs(umiMap.begin(),umiMap.end());
-
+//
     sort(freqs.begin(), freqs.end(),
          [](const pair<umi_type, ReadFreq*>& a, const pair<umi_type, ReadFreq*>& b) {
              return a.second->freq > b.second->freq;  // 降序排序
          }
     );
-
     //构建邻链接边
+//        vector<unordered_set<umi_type>>adjIdx(freqs.size());
     unordered_map<umi_type,unordered_set<umi_type>>adj;
 //        int near_number=0;
     for (int j = 0; j < freqs.size(); ++j) {
@@ -389,6 +362,7 @@ vector<ReadFreq*> reduceOne(unordered_map<umi_type , ReadFreq*>& umiMap){
                                   static_cast<int>((freqs[j].second->freq+1)*percentage));
 //            near_number+=adj[freqs[j].first].size();
     }
+
 
     unordered_set<umi_type>visited;
 
@@ -398,9 +372,6 @@ vector<ReadFreq*> reduceOne(unordered_map<umi_type , ReadFreq*>& umiMap){
             deduped.push_back(freq.second);
         }
     }
-    avgUMICount += umiMap.size();
-    maxUMICount = std::max(maxUMICount, (unsigned int)umiMap.size());
-    dedupedCount += deduped.size();
     return deduped;
     //处理完成
 }
