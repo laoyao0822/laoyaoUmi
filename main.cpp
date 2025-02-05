@@ -38,10 +38,14 @@ alignas(64) unsigned int total_read_count=0;
 alignas(64) unsigned int chunk_N=0;
 bam1_t *** b_array;
 bool* consumer_flags;
+int num_of_consumer=35;
 
 char sep='_';
 //a,c,g,t之间的编码不同的位数都是2
 const int ENCODING_DIST=2;
+
+
+
 const std::unordered_map<char, uint8_t> ENCODING_MAP{
         {'A', 0b000},
         {'T', 0b101},
@@ -86,7 +90,7 @@ struct ReadFreq {
 };
 //用于向消费者传输数据
 vector<pair<Alignment , unsigned int >>* processor_datas;
-
+vector<pair<Alignment , unsigned int >>* consumer_local_datas;
 // Hash 函数
 namespace std {
     template <>
@@ -118,7 +122,7 @@ bam1_t* getBam1_t(unsigned index){
 //}
 
 int main(int argc,char *argv[]){
-    int num_of_consumer=35;
+    num_of_consumer=35;
     b_array=(bam1_t***) malloc(sizeof (bam1_t**)*CHUNK_SIZE);
     consumer_flags= (bool *)calloc(num_of_consumer, sizeof(bool));
     processor_datas= (vector<pair<Alignment , unsigned int >>*)
@@ -145,7 +149,8 @@ int main(int argc,char *argv[]){
 
 
     unsigned int read_count=0;
-    alignas(64) bool init_done=false;
+    alignas(64) int init_done=0;
+    unsigned int p_total=0;
 #pragma omp parallel sections num_threads(2)
     {
         //初始化读入内存
@@ -158,12 +163,21 @@ int main(int argc,char *argv[]){
                 bam1_t* b= bam_init1();
                 if (sam_read1(bam_in, bam_header, b) < 0) {
                     //执行完成
-                    total_read_count+=p_read;
-                    b_array[chunk_N]=b_array_local;
+                    p_total+=p_read;
+                    if (p_read>0){
+                        b_array[chunk_N]=b_array_local;
+                    }
+                    total_read_count=p_total;
                     #pragma omp atomic
                     init_done+=1;
+                    if (p_read>0) {
+                        #pragma omp flush(b_array)
+                        #pragma omp atomic
+                        chunk_N++;
+                        #pragma omp flush(chunk_N)
+                    }
                     #pragma omp atomic
-                    chunk_N++;
+                    init_done+=1;
                     bam_destroy1(b);
                     cout << "init vector over,cost time:" << omp_get_wtime() - start_time << endl;
                     cout<<total_read_count<<endl;
@@ -175,7 +189,8 @@ int main(int argc,char *argv[]){
                 if (p_read%CHUNK_SIZE==0) {
                     //将这块数据放入
                     b_array[chunk_N]=b_array_local;
-                    total_read_count+=CHUNK_SIZE;
+                    p_total+=CHUNK_SIZE;
+                    #pragma omp flush(b_array)
                     #pragma omp atomic
                     chunk_N++;
                     p_read=0;
@@ -193,16 +208,20 @@ int main(int argc,char *argv[]){
             while (true) {
                 #pragma omp atomic read
                 toN=chunk_N;
-                if (toN==current_n){
-                    usleep(100000);
-                    continue;
-                }
                 if (init_done) {
+                    while (init_done!=2){
+                        usleep(100);
+                    }
+                    toN=chunk_N;
                     for (unsigned int i = current_n; i < toN-1; ++i) {
                         read_count+= mapSectionChunk(bam_header,i,CHUNK_SIZE);
                     }
                     read_count+=mapSectionChunk(bam_header,toN-1,(total_read_count-1)%CHUNK_SIZE+1);
                     break;
+                }
+                if (toN==current_n){
+                    usleep(100000);
+                    continue;
                 }
                 for (unsigned int i = current_n; i < toN; ++i) {
                     read_count+= mapSectionChunk(bam_header,i, CHUNK_SIZE);
@@ -273,7 +292,36 @@ int main(int argc,char *argv[]){
     return 0;
 //    hts_idx_destroy();
 }
+unsigned int produceChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned int read_size){
+    int read_count=0;
+    unsigned int current_pos=CHUNK_SIZE*chunk_n;
+    bam1_t** chunk=b_array[chunk_n];
+    for (int p_read_count = 0; p_read_count <read_size; ++p_read_count) {
+        bam1_t *b = chunk[p_read_count];
+        //判断是否是无效印迹s
+        if (b->core.flag & BAM_FUNMAP) {
+            unmapped++;
+            continue;
+        }
+        bool readNegativeFlag = b->core.flag & BAM_FREVERSE;
+        //获取这条记录的位置
+        Alignment alignment{readNegativeFlag,
+                            (readNegativeFlag ? get_unclipped_end(b) : get_unclipped_start(b)),
+                            get_reference_name(b, bam_header)};
 
+    }
+    for (int i = 0; i < num_of_consumer; ++i) {
+        //内部还有数据，
+        if (consumer_flags[i]){
+
+        } else{
+            //内部无数据，放入后改为true
+
+        }
+
+    }
+    return read_count;
+}
  /**
   * map阶段，将所有位置，umi相同的记录聚合到一起,处理一个Chunk
   * @param bam_header 头
