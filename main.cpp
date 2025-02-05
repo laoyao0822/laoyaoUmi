@@ -14,6 +14,7 @@
 #include "htslib/thread_pool.h"
 #include <unistd.h>
 #include <list>
+#include <atomic>
 using namespace std;
 
 //using umi_type=bitset<64>  ;
@@ -35,7 +36,7 @@ int k=1;
 bool read_done= false;
 const unsigned int CHUNK_SIZE=1000000;
 alignas(64) unsigned int total_read_count=0;
-alignas(64) unsigned int chunk_N=0;
+atomic<unsigned int >chunk_N(0);
 bam1_t *** b_array;
 bool* consumer_flags;
 int num_of_consumer=35;
@@ -123,7 +124,7 @@ bam1_t* getBam1_t(unsigned index){
 
 int main(int argc,char *argv[]){
     num_of_consumer=35;
-    b_array=(bam1_t***) malloc(sizeof (bam1_t**)*CHUNK_SIZE);
+    b_array=(bam1_t***) malloc(sizeof (bam1_t**)*10000);
     consumer_flags= (bool *)calloc(num_of_consumer, sizeof(bool));
     processor_datas= (vector<pair<Alignment , unsigned int >>*)
             malloc(sizeof (vector<pair<Alignment , unsigned int >>)*num_of_consumer);
@@ -149,7 +150,7 @@ int main(int argc,char *argv[]){
 
 
     unsigned int read_count=0;
-    alignas(64) int init_done=0;
+    atomic<int> init_done(0);
     unsigned int p_total=0;
 #pragma omp parallel sections num_threads(2)
     {
@@ -159,25 +160,21 @@ int main(int argc,char *argv[]){
             cout << "bam init over,cost time:" << omp_get_wtime() - start_time << endl;
             unsigned int p_read=0;
             auto ** b_array_local= (bam1_t** )malloc(CHUNK_SIZE*sizeof(bam1_t*));
+            unsigned int p_chunk_n;
             while (true) {
                 bam1_t* b= bam_init1();
                 if (sam_read1(bam_in, bam_header, b) < 0) {
                     //执行完成
                     p_total+=p_read;
                     if (p_read>0){
-                        b_array[chunk_N]=b_array_local;
+                        b_array[p_chunk_n]=b_array_local;
                     }
                     total_read_count=p_total;
-                    #pragma omp atomic
-                    init_done+=1;
+                    init_done.store(1,memory_order_acquire);
                     if (p_read>0) {
-                        #pragma omp flush(b_array)
-                        #pragma omp atomic
-                        chunk_N++;
-                        #pragma omp flush(chunk_N)
+                        chunk_N.fetch_add(1,std::memory_order_acquire);
                     }
-                    #pragma omp atomic
-                    init_done+=1;
+                    init_done.store(2,memory_order_acquire);
                     bam_destroy1(b);
                     cout << "init vector over,cost time:" << omp_get_wtime() - start_time << endl;
                     cout<<total_read_count<<endl;
@@ -188,11 +185,10 @@ int main(int argc,char *argv[]){
                 //每一定间隔发送数据
                 if (p_read%CHUNK_SIZE==0) {
                     //将这块数据放入
-                    b_array[chunk_N]=b_array_local;
+                    b_array[p_chunk_n]=b_array_local;
                     p_total+=CHUNK_SIZE;
-                    #pragma omp flush(b_array)
-                    #pragma omp atomic
-                    chunk_N++;
+                    p_chunk_n++;
+                    chunk_N.fetch_add(1,std::memory_order_acquire);
                     p_read=0;
                     b_array_local=(bam1_t** )malloc(sizeof(bam1_t*)*CHUNK_SIZE);
                 }
@@ -206,13 +202,12 @@ int main(int argc,char *argv[]){
             unsigned int toN=0;
         //进入第一步map阶段
             while (true) {
-                #pragma omp atomic read
-                toN=chunk_N;
-                if (init_done) {
-                    while (init_done!=2){
+                toN=chunk_N.load(memory_order_release);
+                if (init_done.load(memory_order_release)) {
+                    while (init_done.load(memory_order_release)!=2){
                         usleep(100);
                     }
-                    toN=chunk_N;
+                    toN=chunk_N.load(memory_order_seq_cst);
                     for (unsigned int i = current_n; i < toN-1; ++i) {
                         read_count+= mapSectionChunk(bam_header,i,CHUNK_SIZE);
                     }
