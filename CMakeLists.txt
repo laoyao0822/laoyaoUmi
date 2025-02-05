@@ -16,17 +16,17 @@ if (OpenMP_FOUND)
 else()
     message(FATAL_ERROR "OpenMP not found.")
 endif()
-
+message("${CMAKE_CXX_COMPILER_ID}")
 # 针对 GCC 编译器配置 OpenMP 和优化
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")
     # 只添加一次 OpenMP 标志
     if (NOT CMAKE_CXX_FLAGS MATCHES "-fopenmp")
-        add_compile_options(-fopenmp)
-        message("GCC/Clang detected: Using -fopenmp")
+        add_compile_options(-qopenmp)
+        message("GCC/Clang detected: Using --fopenmp")
     endif()
-
+#-Ofast -mavx -mavx2 -msse -msse2
     # 设置 GCC 编译器优化等级为 -O3
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 ")
     message("GCC/Clang detected: Using -O3 optimization")
 else()
     message(WARNING "Unknown compiler, OpenMP flags might not be set.")

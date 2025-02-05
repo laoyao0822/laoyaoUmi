@@ -36,10 +36,10 @@ int k=1;
 bool read_done= false;
 const unsigned int CHUNK_SIZE=1000000;
 alignas(64) unsigned int total_read_count=0;
-atomic<unsigned int >chunk_N(0);
+unsigned int chunk_N=0;
 bam1_t *** b_array;
 bool* consumer_flags;
-int num_of_consumer=35;
+int num_of_consumer=9;
 
 char sep='_';
 //a,c,g,t之间的编码不同的位数都是2
@@ -90,8 +90,8 @@ struct ReadFreq {
 
 };
 //用于向消费者传输数据
-vector<pair<Alignment , unsigned int >>* processor_datas;
-vector<pair<Alignment , unsigned int >>* consumer_local_datas;
+vector<pair<Alignment , unsigned int >>** processor_datas;
+vector<pair<Alignment , unsigned int >>** consumer_local_datas;
 // Hash 函数
 namespace std {
     template <>
@@ -101,8 +101,8 @@ namespace std {
         }
     };
 }
-size_t getHash(const Alignment& ali){
-    return hash<bool>()(!ali.isReversed)^hash<string>()(ali.refName) ^ hash<int64_t>()(ali.pos) ;
+unsigned long getHash(const Alignment& ali){
+    return (hash<bool>()(!ali.isReversed)^hash<string>()(ali.refName) ^ hash<int64_t>()(ali.pos)) ;
 }
 unordered_map<Alignment, unordered_map<umi_type , ReadFreq*>> alignmentMap;
 unordered_set<umi_type> near(const vector<pair<umi_type,ReadFreq*>>& freqs,const umi_type& umi, int maxFreq);
@@ -123,11 +123,11 @@ bam1_t* getBam1_t(unsigned index){
 //}
 
 int main(int argc,char *argv[]){
-    num_of_consumer=35;
-    b_array=(bam1_t***) malloc(sizeof (bam1_t**)*10000);
+    num_of_consumer=10;
+    b_array=(bam1_t***) malloc(sizeof (bam1_t**)*100000);
     consumer_flags= (bool *)calloc(num_of_consumer, sizeof(bool));
-    processor_datas= (vector<pair<Alignment , unsigned int >>*)
-            malloc(sizeof (vector<pair<Alignment , unsigned int >>)*num_of_consumer);
+    processor_datas= (vector<pair<Alignment , unsigned int >>**)
+            malloc(sizeof (vector<pair<Alignment , unsigned int >>*)*num_of_consumer);
     omp_set_num_threads(num_of_consumer);
     samFile *bam_in= sam_open(argv[1],"r");
     htsFile *bam_out= hts_open(argv[2],"wb");
@@ -138,7 +138,7 @@ int main(int argc,char *argv[]){
     }
     cout<<argv[1]<<endl;
     htsThreadPool tpool = {NULL, 0};
-    tpool.pool = hts_tpool_init(50);
+    tpool.pool = hts_tpool_init(8);
     if (tpool.pool) {
         hts_set_opt(bam_in, HTS_OPT_THREAD_POOL, &tpool);
         hts_set_opt(bam_out, HTS_OPT_THREAD_POOL, &tpool);
@@ -150,7 +150,7 @@ int main(int argc,char *argv[]){
 
 
     unsigned int read_count=0;
-    atomic<int> init_done(0);
+    int init_done=0;
     unsigned int p_total=0;
 #pragma omp parallel sections num_threads(2)
     {
@@ -160,7 +160,7 @@ int main(int argc,char *argv[]){
             cout << "bam init over,cost time:" << omp_get_wtime() - start_time << endl;
             unsigned int p_read=0;
             auto ** b_array_local= (bam1_t** )malloc(CHUNK_SIZE*sizeof(bam1_t*));
-            unsigned int p_chunk_n;
+            unsigned int p_chunk_n=0;
             while (true) {
                 bam1_t* b= bam_init1();
                 if (sam_read1(bam_in, bam_header, b) < 0) {
@@ -170,11 +170,14 @@ int main(int argc,char *argv[]){
                         b_array[p_chunk_n]=b_array_local;
                     }
                     total_read_count=p_total;
-                    init_done.store(1,memory_order_acquire);
+                    #pragma omp atomic seq_cst
+                    init_done++;
                     if (p_read>0) {
-                        chunk_N.fetch_add(1,std::memory_order_acquire);
+                        #pragma omp atomic seq_cst//acquire
+                        chunk_N++;
                     }
-                    init_done.store(2,memory_order_acquire);
+                    #pragma omp atomic seq_cst
+                    init_done++;
                     bam_destroy1(b);
                     cout << "init vector over,cost time:" << omp_get_wtime() - start_time << endl;
                     cout<<total_read_count<<endl;
@@ -185,10 +188,10 @@ int main(int argc,char *argv[]){
                 //每一定间隔发送数据
                 if (p_read%CHUNK_SIZE==0) {
                     //将这块数据放入
-                    b_array[p_chunk_n]=b_array_local;
+                    b_array[p_chunk_n++]=b_array_local;
                     p_total+=CHUNK_SIZE;
-                    p_chunk_n++;
-                    chunk_N.fetch_add(1,std::memory_order_acquire);
+                    #pragma omp atomic seq_cst
+                    chunk_N++;
                     p_read=0;
                     b_array_local=(bam1_t** )malloc(sizeof(bam1_t*)*CHUNK_SIZE);
                 }
@@ -197,17 +200,19 @@ int main(int argc,char *argv[]){
         //
         #pragma omp section
         {
-            usleep(4000000);
+            usleep(1000000);
             unsigned int current_n=0;
             unsigned int toN=0;
         //进入第一步map阶段
             while (true) {
-                toN=chunk_N.load(memory_order_release);
-                if (init_done.load(memory_order_release)) {
-                    while (init_done.load(memory_order_release)!=2){
+                #pragma omp atomic read seq_cst
+                toN=chunk_N;
+                if (init_done) {
+                    while (init_done!=2){
                         usleep(100);
                     }
-                    toN=chunk_N.load(memory_order_seq_cst);
+                    #pragma omp atomic read seq_cst
+                    toN=chunk_N;
                     for (unsigned int i = current_n; i < toN-1; ++i) {
                         read_count+= mapSectionChunk(bam_header,i,CHUNK_SIZE);
                     }
@@ -215,7 +220,7 @@ int main(int argc,char *argv[]){
                     break;
                 }
                 if (toN==current_n){
-                    usleep(100000);
+                    usleep(1000);
                     continue;
                 }
                 for (unsigned int i = current_n; i < toN; ++i) {
@@ -237,7 +242,7 @@ int main(int argc,char *argv[]){
     alignPosCount = alignmentMap.size();
     avgUMICount = 0,maxUMICount = 0,dedupedCount = 0;
     vector<std::pair<Alignment, unordered_map<umi_type , ReadFreq*>>> entries(alignmentMap.begin(), alignmentMap.end());
-    omp_set_num_threads(40);
+    omp_set_num_threads(num_of_consumer);
 
 #pragma omp parallel for schedule(dynamic) reduction(+:dedupedCount,avgUMICount) reduction(max:maxUMICount)
     for (unsigned int i = 0; i < entries.size(); ++i) {
@@ -265,6 +270,8 @@ int main(int argc,char *argv[]){
     cout<<"Average number of UMIs per alignment position\t" <<((double)avgUMICount / alignPosCount)<<endl;
     cout<<"Max number of UMIs over all alignment positions\t" << maxUMICount<<endl;
     cout<<"Number of reads after deduplicating\t" << dedupedCount<<endl;
+//    sam_close(bam_out);
+//    exit(0);
     #pragma omp parallel for
     for (int i = 0; i < chunk_N; ++i) {
         unsigned int last=CHUNK_SIZE;
@@ -277,6 +284,7 @@ int main(int argc,char *argv[]){
         }
         free(to_destroy);
     }
+
     bam_hdr_destroy(bam_header);
     sam_close(bam_in);
     if (tpool.pool) {
@@ -303,15 +311,21 @@ unsigned int produceChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned in
         Alignment alignment{readNegativeFlag,
                             (readNegativeFlag ? get_unclipped_end(b) : get_unclipped_start(b)),
                             get_reference_name(b, bam_header)};
-
+        unsigned long pos_hash= getHash(alignment)&num_of_consumer;
+        consumer_local_datas[pos_hash]->emplace_back(alignment,chunk_n*CHUNK_SIZE+p_read_count);
     }
     for (int i = 0; i < num_of_consumer; ++i) {
         //内部还有数据，
         if (consumer_flags[i]){
-
+            continue;
         } else{
             //内部无数据，放入后改为true
-
+            consumer_local_datas[i]=processor_datas[i];
+            #pragma omp atomic write seq_cst
+            //成功放入后
+            consumer_flags[i]= false;
+            vector<pair<Alignment,unsigned int >> vec_tmp;
+            consumer_local_datas[i]=&vec_tmp;
         }
 
     }
@@ -410,7 +424,7 @@ void finalConsumer(){
         //获取信号，表示有新的
         while (true) {
             if (consumer_flags[id]) {
-                process_data=processor_datas[id];
+                process_data=*processor_datas[id];
                 #pragma atomic
                 consumer_flags[id]-=1;
                 for (const auto &[ali, pos]: process_data) {
@@ -447,11 +461,9 @@ void finalConsumer(){
                 }
                 //处理完成退出线程
                 break;
-
             }
         }
     }
-
 }
 
 /**
