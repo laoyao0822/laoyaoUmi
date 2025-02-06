@@ -27,8 +27,8 @@ umi_type extractUMI(const std::string& readName);
 int64_t get_unclipped_start(bam1_t *b) ;
 int64_t get_unclipped_end(bam1_t *b);
 int unmapped=0;
-unsigned int alignPosCount ;
-unsigned int avgUMICount ,maxUMICount,dedupedCount ;
+unsigned int alignPosCount=0 ;
+unsigned int avgUMICount=0 ,maxUMICount=0,dedupedCount=0 ;
 //near的乘值
 double percentage = 0.5f;
 //near的系数
@@ -104,15 +104,18 @@ namespace std {
 unsigned long getHash(const Alignment& ali){
     return (hash<bool>()(!ali.isReversed)^hash<string>()(ali.refName) ^ hash<int64_t>()(ali.pos)) ;
 }
-unordered_map<Alignment, unordered_map<umi_type , ReadFreq*>> alignmentMap;
+//unordered_map<Alignment, unordered_map<umi_type , ReadFreq*>> alignmentMap;
 unordered_set<umi_type> near(const vector<pair<umi_type,ReadFreq*>>& freqs,const umi_type& umi, int maxFreq);
 void visitAndRemove(const umi_type & u,unordered_map<umi_type, unordered_set<umi_type>>& adj,
                     unordered_set<umi_type>& visited);
 void visitAndRemoveV2(const umi_type & u,
                       unordered_map<umi_type, adj_type>& adj, unordered_set<umi_type>& visited);
 int umi_dist(const umi_type &a,const umi_type& b);
-unsigned int mapSectionChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned int read_size);
-vector<ReadFreq*> reduceOne(unordered_map<umi_type , ReadFreq*>& umiMap);
+//unsigned int mapSectionChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned int read_size);
+unsigned int produceChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned int read_size);
+void consumeOne(const Alignment& alignment,unsigned int pos,
+                unordered_map<Alignment, unordered_map<umi_type , ReadFreq*>>& local_align,
+                unordered_map<Alignment, unordered_map<umi_type,adj_type>>& align_adjs);
 bam1_t* getBam1_t(unsigned index){
     return b_array[index/CHUNK_SIZE][index%CHUNK_SIZE];
 }
@@ -123,11 +126,20 @@ bam1_t* getBam1_t(unsigned index){
 //}
 
 int main(int argc,char *argv[]){
-    num_of_consumer=10;
     b_array=(bam1_t***) malloc(sizeof (bam1_t**)*100000);
     consumer_flags= (bool *)calloc(num_of_consumer, sizeof(bool));
     processor_datas= (vector<pair<Alignment , unsigned int >>**)
             malloc(sizeof (vector<pair<Alignment , unsigned int >>*)*num_of_consumer);
+    consumer_local_datas=(vector<pair<Alignment , unsigned int >>**)
+            malloc(sizeof (vector<pair<Alignment , unsigned int >>*)*num_of_consumer);
+    omp_set_nested(1);
+    for (int i = 0; i < num_of_consumer; ++i) {
+//        vector<pair<Alignment , unsigned int >> p_v;
+//        vector<pair<Alignment , unsigned int >> c_v;
+        consumer_local_datas[i]=new vector<pair<Alignment , unsigned int >>;
+        processor_datas[i]=new vector<pair<Alignment , unsigned int >>;
+    }
+
     omp_set_num_threads(num_of_consumer);
     samFile *bam_in= sam_open(argv[1],"r");
     htsFile *bam_out= hts_open(argv[2],"wb");
@@ -136,9 +148,10 @@ int main(int argc,char *argv[]){
         cerr << "Error writing output." << endl;
         exit(-1);
     }
+
     cout<<argv[1]<<endl;
     htsThreadPool tpool = {NULL, 0};
-    tpool.pool = hts_tpool_init(8);
+    tpool.pool = hts_tpool_init(18);
     if (tpool.pool) {
         hts_set_opt(bam_in, HTS_OPT_THREAD_POOL, &tpool);
         hts_set_opt(bam_out, HTS_OPT_THREAD_POOL, &tpool);
@@ -147,17 +160,16 @@ int main(int argc,char *argv[]){
 //    hts_set_threads(bam_out,20);
     double start_time;
     start_time=omp_get_wtime();
-
+    avgUMICount = 0,maxUMICount = 0,dedupedCount = 0;
 
     unsigned int read_count=0;
     int init_done=0;
     unsigned int p_total=0;
-#pragma omp parallel sections num_threads(2)
+#pragma omp parallel sections num_threads(3)
     {
         //初始化读入内存
         #pragma omp section
         {
-            cout << "bam init over,cost time:" << omp_get_wtime() - start_time << endl;
             unsigned int p_read=0;
             auto ** b_array_local= (bam1_t** )malloc(CHUNK_SIZE*sizeof(bam1_t*));
             unsigned int p_chunk_n=0;
@@ -194,15 +206,17 @@ int main(int argc,char *argv[]){
                     chunk_N++;
                     p_read=0;
                     b_array_local=(bam1_t** )malloc(sizeof(bam1_t*)*CHUNK_SIZE);
+//                    cout<<"send chunk"<<endl;
                 }
             }
         }
         //
         #pragma omp section
         {
-            usleep(1000000);
+
             unsigned int current_n=0;
             unsigned int toN=0;
+            cout<<"producer begin "<<endl;
         //进入第一步map阶段
             while (true) {
                 #pragma omp atomic read seq_cst
@@ -214,55 +228,153 @@ int main(int argc,char *argv[]){
                     #pragma omp atomic read seq_cst
                     toN=chunk_N;
                     for (unsigned int i = current_n; i < toN-1; ++i) {
-                        read_count+= mapSectionChunk(bam_header,i,CHUNK_SIZE);
+                        read_count+= produceChunk(bam_header,i,CHUNK_SIZE);
                     }
-                    read_count+=mapSectionChunk(bam_header,toN-1,(total_read_count-1)%CHUNK_SIZE+1);
+                    read_count+=produceChunk(bam_header,toN-1,(total_read_count-1)%CHUNK_SIZE+1);
+                    //确保生产者的所有数据被发送给消费者
+                    while (true) {
+                        int number_rest=num_of_consumer;
+                        for (int i = 0; i < num_of_consumer; ++i) {
+                            if(consumer_local_datas[i]== nullptr||consumer_local_datas[i]->empty()){
+                                number_rest--;
+                                continue;
+                            }
+                            //内部无数据
+                            if (!consumer_flags[i]) {
+                                processor_datas[i] = consumer_local_datas[i];
+                                #pragma omp atomic write seq_cst
+                                //成功放入后
+                                consumer_flags[i] = true;
+                                number_rest--;
+                                consumer_local_datas[i] = nullptr;
+                            }
+                        }
+                        if (number_rest==0){
+                            break;
+                        }
+                    }
+                    cout<<"all producer local data clear"<<endl;
                     break;
                 }
                 if (toN==current_n){
                     usleep(1000);
                     continue;
                 }
+//                cout<<"receive chunk"<<toN<<endl;
+
                 for (unsigned int i = current_n; i < toN; ++i) {
-                    read_count+= mapSectionChunk(bam_header,i, CHUNK_SIZE);
+                    read_count+= produceChunk(bam_header,i, CHUNK_SIZE);
                 }
                 current_n=toN;
                 //不再有新的，处理完剩余的退出
             }
+            #pragma omp atomic write seq_cst
+            read_done= true;
         }
-    }
-//    exit(0);
-//    #pragma omp parallel for reduction(+:read_count) reduction(+:unmapped)
-    cout<<"total read count"<<total_read_count<<endl;
-
-    cout<<"map is over"<<endl;
-    cout<<"unmapped number:"<<unmapped<<endl;
-    cout<<"map over,cost time:"<<omp_get_wtime()-start_time<<endl;
-
-    alignPosCount = alignmentMap.size();
-    avgUMICount = 0,maxUMICount = 0,dedupedCount = 0;
-    vector<std::pair<Alignment, unordered_map<umi_type , ReadFreq*>>> entries(alignmentMap.begin(), alignmentMap.end());
-    omp_set_num_threads(num_of_consumer);
-
-#pragma omp parallel for schedule(dynamic) reduction(+:dedupedCount,avgUMICount) reduction(max:maxUMICount)
-    for (unsigned int i = 0; i < entries.size(); ++i) {
-//        auto& [ali, umiMap]=entries[i];
-//        vector<ReadFreq*>deduped=reduceOne(umiMap);
-        auto& [ali, umiMap]=entries[i];
-        vector<ReadFreq*>deduped= reduceOne(umiMap);
-        avgUMICount += umiMap.size();
-        maxUMICount = std::max(maxUMICount, (unsigned int)umiMap.size());
-        dedupedCount += deduped.size();
-        #pragma omp critical
+        #pragma omp section
         {
-            for(ReadFreq* readFreq:deduped){
-                if (sam_write1(bam_out,bam_header, getBam1_t(readFreq->b))<0){
-                    cerr << "Error writing output." << endl;
-                    exit(-1);
+            #pragma omp parallel num_threads(num_of_consumer) reduction(+:dedupedCount,avgUMICount,alignPosCount) reduction(max:maxUMICount)
+            {
+                int id = omp_get_thread_num();
+                //cout<<id<<" begin"<<endl;
+                unordered_map<Alignment, unordered_map<umi_type, ReadFreq *>> local_align;
+                unordered_map<Alignment, unordered_map<umi_type, adj_type>> align_adjs;
+                vector<unsigned int> poses;
+                vector<pair<Alignment , unsigned int >> process_data;
+                //获取信号，表示有新的
+                while (true) {
+                    if (consumer_flags[id]) {
+                        process_data=*processor_datas[id];
+                        #pragma atomic write seq_cst
+                        consumer_flags[id]= false;
+                        for (const auto &[ali, pos]: process_data) {
+                            consumeOne(ali, pos, local_align, align_adjs);
+                        }
+                        //等待一段事件再次获取
+                    } else {
+                        usleep(100);
+                    }
+                    if (read_done) {
+                        //再一次执行，确保处理完全
+                        if (consumer_flags[id]) {
+                            process_data=*processor_datas[id];
+                            for (const auto &[ali, pos]: process_data) {
+                                consumeOne(ali, pos, local_align, align_adjs);
+                            }
+                        }
+                        alignPosCount=local_align.size();
+                        //处理完成退出线程
+                        break;
+                    }
+                }
+                //处理完成进入后处理阶段
+                for (auto &tackle_map: align_adjs) {
+
+                    unordered_map<umi_type, ReadFreq *> umi_read = local_align[tackle_map.first];
+                    vector<pair<umi_type,ReadFreq*>> freqs(umi_read.begin(),umi_read.end());
+//
+                    sort(freqs.begin(), freqs.end(),
+                         [](const pair<umi_type, ReadFreq*>& a, const pair<umi_type, ReadFreq*>& b) {
+                             return a.second->freq > b.second->freq;  // 降序排序
+                         }
+                    );
+                    unordered_map<umi_type,adj_type>umiMap=tackle_map.second;
+                    //再次删除,根据freq删除
+                    for (auto &umi_adjs: umiMap) {
+                        int maxFreq = static_cast<int>(((umi_read[umi_adjs.first]->freq) + 1) * percentage);
+                        adj_type& to_remove = umi_adjs.second;
+//                        for (auto it = to_remove.begin(); it != to_remove.end();) {
+//                            if ((umi_read[*it]->freq) <= maxFreq) {
+//                                it++;
+//                            } else {
+//                                it = to_remove.erase(it);
+//                            }
+//                        }
+                        auto new_end = std::remove_if(
+                                to_remove.begin(),
+                                to_remove.end(),
+                                [&](const auto& elem) {
+                                    return  (umi_read[elem]->freq) > maxFreq;
+                                }
+                        );
+                        to_remove.erase(new_end,to_remove.end());
+                    }
+
+                    unordered_set<umi_type> visited;
+                    vector<unsigned int > deduped;
+                    for (const auto &freq: freqs) {
+                        if (visited.count(freq.first) == 0) {
+                            visitAndRemoveV2(freq.first, umiMap, visited);
+                            deduped.push_back(freq.second->b);
+                        }
+                    }
+                    avgUMICount += umi_read.size();
+                    maxUMICount = std::max(maxUMICount, (unsigned int)umi_read.size());
+                    dedupedCount += deduped.size();
+                    //开始写入
+                    #pragma omp critical
+                    {
+                        for(unsigned int b_pos:deduped){
+                            if (sam_write1(bam_out,bam_header, getBam1_t(b_pos))<0){
+                                cerr << "Error writing output." << endl;
+                                exit(-1);
+                            }
+                        }
+                    }
                 }
             }
         }
     }
+//    exit(0);
+    cout<<"total read count"<<total_read_count<<endl;
+
+    cout<<"map is over"<<endl;
+    cout<<"unmapped number:"<<unmapped<<endl;
+
+
+
+    omp_set_num_threads(num_of_consumer);
+
 //    bam_destroy1(b);
     cout<<"sum is "<<read_count<<",cost time:"<<omp_get_wtime()-start_time<<endl;
     cout<<"Number of unremoved reads\t" <<read_count<<endl;
@@ -295,9 +407,15 @@ int main(int argc,char *argv[]){
     return 0;
 //    hts_idx_destroy();
 }
+/**
+ * 根据alignment分发数据
+ * @param bam_header 头
+ * @param chunk_n 处理第几快
+ * @param read_size 处理多少个，一般为CHUNK
+ * @return
+ */
 unsigned int produceChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned int read_size){
     int read_count=0;
-    unsigned int current_pos=CHUNK_SIZE*chunk_n;
     bam1_t** chunk=b_array[chunk_n];
     for (int p_read_count = 0; p_read_count <read_size; ++p_read_count) {
         bam1_t *b = chunk[p_read_count];
@@ -311,73 +429,28 @@ unsigned int produceChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned in
         Alignment alignment{readNegativeFlag,
                             (readNegativeFlag ? get_unclipped_end(b) : get_unclipped_start(b)),
                             get_reference_name(b, bam_header)};
-        unsigned long pos_hash= getHash(alignment)&num_of_consumer;
+        unsigned long pos_hash= getHash(alignment)%num_of_consumer;
         consumer_local_datas[pos_hash]->emplace_back(alignment,chunk_n*CHUNK_SIZE+p_read_count);
     }
     for (int i = 0; i < num_of_consumer; ++i) {
+
         //内部还有数据，
-        if (consumer_flags[i]){
-            continue;
-        } else{
-            //内部无数据，放入后改为true
-            consumer_local_datas[i]=processor_datas[i];
+        if (!consumer_flags[i]){
+//            cout<<"ready to put "<<i<<endl;
+            processor_datas[i]=consumer_local_datas[i];
+//            cout<<"put sucess"<<i<<endl;
             #pragma omp atomic write seq_cst
             //成功放入后
-            consumer_flags[i]= false;
-            vector<pair<Alignment,unsigned int >> vec_tmp;
-            consumer_local_datas[i]=&vec_tmp;
+            consumer_flags[i]= true;
+//            vector<pair<Alignment,unsigned int >> vec_tmp;
+            consumer_local_datas[i]=new vector<pair<Alignment,unsigned int >>;
         }
 
     }
     return read_count;
 }
- /**
-  * map阶段，将所有位置，umi相同的记录聚合到一起,处理一个Chunk
-  * @param bam_header 头
-  * @param chunk_n 处理第几快
-  * @param read_size 处理多少个，一般为CHUNK
-  * @return
-  */
-unsigned int mapSectionChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned int read_size){
-    int read_count=0;
-    unsigned int current_pos=CHUNK_SIZE*chunk_n;
-    bam1_t** chunk=b_array[chunk_n];
-    for (int p_read_count = 0; p_read_count <read_size; ++p_read_count) {
-        bam1_t* b=chunk[p_read_count];
-        //判断是否是无效印迹s
-        if (b->core.flag&BAM_FUNMAP){
-            unmapped++;
-            continue;
-        }
-        bool readNegativeFlag=b->core.flag&BAM_FREVERSE;
-        string q_name= bam_get_qname(b);
-        umi_type umi= extractUMI(q_name);
-//        cout<<q_name<<endl;
-        //获取这条记录的位置
-        Alignment alignment{readNegativeFlag,
-                            (readNegativeFlag ? get_unclipped_end(b) : get_unclipped_start(b)),
-                            get_reference_name(b,bam_header)};
-        //获取这条记录的质量分数
-        score_type score= get_avg_qual(b);
-        #pragma omp critical
-        {
-            // 确保对齐位置已存在
-            if (!alignmentMap.count(alignment)) {
-                alignmentMap[alignment] = unordered_map<umi_type, ReadFreq *>();
-            }
-            // 处理 UMI 计数
-            auto &umiMap = alignmentMap[alignment];
-            auto it_read = umiMap.find(umi);
-            if (it_read != umiMap.end()) {
-                it_read->second->merge(current_pos+p_read_count, score);
-            } else {
-                umiMap.insert({umi, new ReadFreq(current_pos+p_read_count, score)});
-            }
-        }
-        read_count++;
-    }
-    return read_count;
-}
+
+
 void consumeOne(const Alignment& alignment,unsigned int pos,
                 unordered_map<Alignment, unordered_map<umi_type , ReadFreq*>>& local_align,
 unordered_map<Alignment, unordered_map<umi_type,adj_type>>& align_adjs){
@@ -386,9 +459,6 @@ unordered_map<Alignment, unordered_map<umi_type,adj_type>>& align_adjs){
     umi_type umi= extractUMI(q_name);
     score_type score= get_avg_qual(b);
 
-    if (!alignmentMap.count(alignment)) {
-        local_align[alignment] = unordered_map<umi_type, ReadFreq *>();
-    }
     auto &umiMap = local_align[alignment];
     auto it_read = umiMap.find(umi);
     if (it_read != umiMap.end()) {
@@ -396,112 +466,26 @@ unordered_map<Alignment, unordered_map<umi_type,adj_type>>& align_adjs){
         it_read->second->merge(pos,score );
     } else {
         //原来不存在合并
-        umiMap.insert({umi, new ReadFreq(pos, score)});
         //将结果放入对应adj,根据dist筛选
-        unordered_map<umi_type,adj_type>adjs;
+        unordered_map<umi_type,adj_type>adjs=align_adjs[alignment];
         adj_type one_adj;
         for (auto & iter : umiMap) {
             int dist=umi_dist(iter.first,umi);
-            if (dist<k){
+            if (dist<=k){
                 adjs[iter.first].push_back(umi);
                 one_adj.push_back(iter.first);
             }
         }
+        umiMap.insert({umi, new ReadFreq(pos, score)});
         adjs[umi]=one_adj;
         align_adjs[alignment]=adjs;
     }
 }
-void finalConsumer(){
+void finalConsumer(htsFile* bam_out,sam_hdr_t* bam_header){
 
-    #pragma omp parallel
-    {
-        int id = omp_get_thread_num();
-        unordered_map<Alignment, unordered_map<umi_type, ReadFreq *>> local_align;
-        unordered_map<Alignment, unordered_map<umi_type, adj_type>> align_adjs;
-        vector<unsigned int> poses;
-        vector<pair<Alignment , unsigned int >> process_data;
-
-        //获取信号，表示有新的
-        while (true) {
-            if (consumer_flags[id]) {
-                process_data=*processor_datas[id];
-                #pragma atomic
-                consumer_flags[id]-=1;
-                for (const auto &[ali, pos]: process_data) {
-                    consumeOne(ali, pos, local_align, align_adjs);
-                }
-            } else {
-                usleep(100);
-            }
-            if (read_done) {
-                //处理完成进入后处理阶段
-                for (auto &tackle_map: align_adjs) {
-                    unordered_map<umi_type, ReadFreq *> umi_read = local_align[tackle_map.first];
-                    //再次删除,根据freq删除
-                    for (auto &umi_adjs: tackle_map.second) {
-                        int maxFreq = static_cast<int>((umi_read[umi_adjs.first]->freq + 1) * percentage);
-                        adj_type to_remove = umi_adjs.second;
-                        for (auto it = to_remove.begin(); it != to_remove.end();) {
-                            if (umi_read[*it]->freq > maxFreq) {
-                                it = to_remove.erase(it);
-                            } else {
-                                it++;
-                            }
-                        }
-                    }
-                    unordered_set<umi_type> visited;
-                    vector<ReadFreq *> deduped;
-                    for (const auto &freq: umi_read) {
-                        if (visited.count(freq.first) == 0) {
-                            visitAndRemoveV2(freq.first, tackle_map.second, visited);
-                            deduped.push_back(freq.second);
-                        }
-                    }
-                    //开始写入
-                }
-                //处理完成退出线程
-                break;
-            }
-        }
-    }
 }
 
-/**
- * 对一条记录进行归约，去除其中频率低，相似的umi
- * @param umiMap
- * @return
- */
-vector<ReadFreq*> reduceOne(unordered_map<umi_type , ReadFreq*>& umiMap){
-//    auto& [ali, umiMap]=entries[i];
-    vector<ReadFreq*>deduped;
-    //读取并按频率排序
-    vector<pair<umi_type,ReadFreq*>> freqs(umiMap.begin(),umiMap.end());
-//
-    sort(freqs.begin(), freqs.end(),
-         [](const pair<umi_type, ReadFreq*>& a, const pair<umi_type, ReadFreq*>& b) {
-             return a.second->freq > b.second->freq;  // 降序排序
-         }
-    );
-    //构建邻链接边
-//        vector<unordered_set<umi_type>>adjIdx(freqs.size());
-    unordered_map<umi_type,unordered_set<umi_type>>adj;
-//        int near_number=0;
-    for (int j = 0; j < freqs.size(); ++j) {
-        adj[freqs[j].first]= near(freqs,freqs[j].first,
-                                  static_cast<int>((freqs[j].second->freq+1)*percentage));
-//            near_number+=adj[freqs[j].first].size();
-    }
-    unordered_set<umi_type>visited;
 
-    for(const auto& freq : freqs){
-        if (visited.count(freq.first)==0){
-            visitAndRemove(freq.first,adj,visited);
-            deduped.push_back(freq.second);
-        }
-    }
-    return deduped;
-    //处理完成
-}
 /**
  * 从read_name/q_name中提取umi
  * 已验证，结果相同
@@ -649,7 +633,6 @@ unordered_set<umi_type> near(const vector<pair<umi_type,ReadFreq*>>& freqs,const
             if (res.count(o)!=0){
                 cout<<" repeat!!!!!!!!!!!!"<<endl;
             }
-
             res.insert(o);
         }
     }
