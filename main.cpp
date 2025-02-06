@@ -39,8 +39,8 @@ alignas(64) unsigned int total_read_count=0;
 unsigned int chunk_N=0;
 bam1_t *** b_array;
 bool* consumer_flags;
-int num_of_consumer=10;
-int num_of_hts=10;
+int num_of_consumer=15;
+int num_of_hts=17;
 //是否在运行时回收内存
 const bool save_memory= false;
 char sep='_';
@@ -185,6 +185,7 @@ int main(int argc,char *argv[]){
     unsigned int read_count=0;
     int init_done=0;
     unsigned int p_total=0;
+    vector<vector<unsigned int>> final_write(num_of_consumer);
 #pragma omp parallel sections num_threads(3)
     {
         //初始化读入内存
@@ -327,34 +328,34 @@ int main(int argc,char *argv[]){
                         break;
                     }
                 }
-                vector<vector<unsigned int>> dedupeds;
+                vector<unsigned int> dedupeds;
                 //处理完成进入后处理阶段
                 for (auto &tackle_map: align_adjs) {
 
                     unordered_map<umi_type, ReadFreq *> umi_read = local_align[tackle_map.first];
-                    vector<pair<umi_type,ReadFreq*>> freqs(umi_read.begin(),umi_read.end());
+                    vector<pair<umi_type, ReadFreq *>> freqs(umi_read.begin(), umi_read.end());
 //
                     sort(freqs.begin(), freqs.end(),
-                         [](const pair<umi_type, ReadFreq*>& a, const pair<umi_type, ReadFreq*>& b) {
+                         [](const pair<umi_type, ReadFreq *> &a, const pair<umi_type, ReadFreq *> &b) {
                              return a.second->freq > b.second->freq;  // 降序排序
                          }
                     );
-                    unordered_map<umi_type,adj_type>umiMap=tackle_map.second;
+                    unordered_map<umi_type, adj_type> umiMap = tackle_map.second;
                     //再次删除,根据freq删除
                     for (auto &umi_adjs: umiMap) {
                         int maxFreq = static_cast<int>(((umi_read[umi_adjs.first]->freq) + 1) * percentage);
-                        adj_type& to_remove = umi_adjs.second;
+                        adj_type &to_remove = umi_adjs.second;
                         auto new_end = std::remove_if(
                                 to_remove.begin(),
                                 to_remove.end(),
-                                [&](const auto& elem) {
-                                    return  (umi_read[elem]->freq) > maxFreq;
+                                [&](const auto &elem) {
+                                    return (umi_read[elem]->freq) > maxFreq;
                                 }
                         );
-                        to_remove.erase(new_end,to_remove.end());
+                        to_remove.erase(new_end, to_remove.end());
                     }
                     unordered_set<umi_type> visited;
-                    vector<unsigned int > deduped;
+                    vector<unsigned int> deduped;
                     for (const auto &freq: freqs) {
                         if (visited.count(freq.first) == 0) {
                             visitAndRemoveV2(freq.first, umiMap, visited);
@@ -362,39 +363,14 @@ int main(int argc,char *argv[]){
                         }
                     }
                     avgUMICount += umi_read.size();
-                    maxUMICount = std::max(maxUMICount, (unsigned int)umi_read.size());
+                    maxUMICount = std::max(maxUMICount, (unsigned int) umi_read.size());
                     dedupedCount += deduped.size();
-                    sort(deduped.begin(),deduped.end());
-                    dedupeds.push_back(deduped);
+//                    sort(deduped.begin(), deduped.end());
+                    dedupeds.insert(dedupeds.end(),deduped.begin(),deduped.end());
                     //开始写入
-                    if (omp_test_lock(&write_lock)) {
-                        for (const vector<unsigned int >& one_de:dedupeds) {
-                            for(unsigned int b_pos:one_de){
-                                if (sam_write1(bam_out,bam_header,getBam1_t(b_pos) )<0){
-                                    cerr << "Error writing output." << endl;
-                                    exit(-1);
-                                }
-                            }
-                        }
-                        omp_unset_lock(&write_lock);
-                        dedupeds.clear();
-                    }
                 }
-                while (true){
-                    if (omp_test_lock(&write_lock)) {
-                        for (const vector<unsigned int >& one_de:dedupeds) {
-                            for(unsigned int b_pos:one_de){
-                                if (sam_write1(bam_out,bam_header,getBam1_t(b_pos) )<0){
-                                    cerr << "Error writing output." << endl;
-                                    exit(-1);
-                                }
-                            }
-                        }
-                        omp_unset_lock(&write_lock);
-                        dedupeds.clear();
-                        break;
-                    }
-                }
+                sort(dedupeds.begin(),dedupeds.end());
+                final_write[id]=dedupeds;
             }
         }
     }
@@ -404,9 +380,23 @@ int main(int argc,char *argv[]){
     cout<<"map is over"<<endl;
     cout<<"unmapped number:"<<unmapped<<endl;
 
+    std::vector<unsigned int> merged;
 
+    // 遍历 final_write 中的每个已排序的 vector
+    for (const auto& vec : final_write) {
+        // 使用 std::merge 将当前已排序的 vec 与 merged 合并
+        std::vector<unsigned int> temp(merged.size() + vec.size());
+        std::merge(merged.begin(), merged.end(), vec.begin(), vec.end(), temp.begin());
+        merged = std::move(temp); // 更新 merged 为合并后的结果
+    }
+    cout<<"merge done start to write:"<<merged.size()<<endl;
 
-    omp_set_num_threads(num_of_consumer);
+    for(unsigned int b_pos:merged){
+        if (sam_write1(bam_out,bam_header, getBam1_t(b_pos))<0){
+            cerr << "Error writing output." << endl;
+            exit(-1);
+        }
+    }
 
 //    bam_destroy1(b);
     cout<<"sum is "<<read_count<<",cost time:"<<omp_get_wtime()-start_time<<endl;
