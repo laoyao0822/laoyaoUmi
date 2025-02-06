@@ -40,7 +40,9 @@ unsigned int chunk_N=0;
 bam1_t *** b_array;
 bool* consumer_flags;
 int num_of_consumer=9;
-
+int num_of_hts=9;
+//是否在运行时回收内存
+const bool save_memory= false;
 char sep='_';
 //a,c,g,t之间的编码不同的位数都是2
 const int ENCODING_DIST=2;
@@ -67,6 +69,7 @@ struct Alignment {
         return isReversed == other.isReversed && pos == other.pos && refName == other.refName;
     }
 };
+void freeBam1_t(unsigned index);
 // ReadFreq 结构体
 struct ReadFreq {
     int freq;
@@ -82,8 +85,15 @@ struct ReadFreq {
     }
     void merge(unsigned int b2,score_type b2_score){
         if (b2_score > this->score){
+            if (save_memory) {
+                freeBam1_t(this->b);
+            }
             this->b=b2;
             this->score=b2_score;
+        } else{
+            if (save_memory) {
+                freeBam1_t(b2);
+            }
         }
         freq++;
     }
@@ -119,20 +129,27 @@ void consumeOne(const Alignment& alignment,unsigned int pos,
 bam1_t* getBam1_t(unsigned index){
     return b_array[index/CHUNK_SIZE][index%CHUNK_SIZE];
 }
-
+void freeBam1_t(unsigned index) {
+    free(b_array[index / CHUNK_SIZE][index % CHUNK_SIZE]->data);
+    free(b_array[index / CHUNK_SIZE][index % CHUNK_SIZE]);
+    b_array[index / CHUNK_SIZE][index % CHUNK_SIZE] = nullptr;
+}
 //bam1_t *bam_initV2(void)
 //{
 //    return (bam1_t*)malloc( sizeof(bam1_t));
 //}
 
 int main(int argc,char *argv[]){
+    cout<<getpid()<<endl;
+    usleep(10000000);
     b_array=(bam1_t***) malloc(sizeof (bam1_t**)*100000);
     consumer_flags= (bool *)calloc(num_of_consumer, sizeof(bool));
     processor_datas= (vector<pair<Alignment , unsigned int >>**)
             malloc(sizeof (vector<pair<Alignment , unsigned int >>*)*num_of_consumer);
     consumer_local_datas=(vector<pair<Alignment , unsigned int >>**)
             malloc(sizeof (vector<pair<Alignment , unsigned int >>*)*num_of_consumer);
-    omp_set_nested(1);
+    omp_set_max_active_levels(2);
+    omp_set_dynamic(0);
     for (int i = 0; i < num_of_consumer; ++i) {
 //        vector<pair<Alignment , unsigned int >> p_v;
 //        vector<pair<Alignment , unsigned int >> c_v;
@@ -151,7 +168,7 @@ int main(int argc,char *argv[]){
 
     cout<<argv[1]<<endl;
     htsThreadPool tpool = {NULL, 0};
-    tpool.pool = hts_tpool_init(18);
+    tpool.pool = hts_tpool_init(num_of_hts);
     if (tpool.pool) {
         hts_set_opt(bam_in, HTS_OPT_THREAD_POOL, &tpool);
         hts_set_opt(bam_out, HTS_OPT_THREAD_POOL, &tpool);
@@ -323,13 +340,6 @@ int main(int argc,char *argv[]){
                     for (auto &umi_adjs: umiMap) {
                         int maxFreq = static_cast<int>(((umi_read[umi_adjs.first]->freq) + 1) * percentage);
                         adj_type& to_remove = umi_adjs.second;
-//                        for (auto it = to_remove.begin(); it != to_remove.end();) {
-//                            if ((umi_read[*it]->freq) <= maxFreq) {
-//                                it++;
-//                            } else {
-//                                it = to_remove.erase(it);
-//                            }
-//                        }
                         auto new_end = std::remove_if(
                                 to_remove.begin(),
                                 to_remove.end(),
@@ -339,7 +349,6 @@ int main(int argc,char *argv[]){
                         );
                         to_remove.erase(new_end,to_remove.end());
                     }
-
                     unordered_set<umi_type> visited;
                     vector<unsigned int > deduped;
                     for (const auto &freq: freqs) {
@@ -382,9 +391,7 @@ int main(int argc,char *argv[]){
     cout<<"Average number of UMIs per alignment position\t" <<((double)avgUMICount / alignPosCount)<<endl;
     cout<<"Max number of UMIs over all alignment positions\t" << maxUMICount<<endl;
     cout<<"Number of reads after deduplicating\t" << dedupedCount<<endl;
-//    sam_close(bam_out);
-//    exit(0);
-    #pragma omp parallel for
+    #pragma omp parallel for schedule(dynamic) num_threads(num_of_consumer+num_of_hts)
     for (int i = 0; i < chunk_N; ++i) {
         unsigned int last=CHUNK_SIZE;
         if (i==CHUNK_SIZE-1){
@@ -392,11 +399,17 @@ int main(int argc,char *argv[]){
         }
         bam1_t ** to_destroy=b_array[i];
         for (int j = 0; j < last; ++j) {
-            bam_destroy1(to_destroy[j]);
+            if (!save_memory) {
+                bam_destroy1(to_destroy[j]);
+            } else {
+                if (to_destroy[i] != nullptr) {
+                    bam_destroy1(to_destroy[j]);
+                }
+            }
         }
         free(to_destroy);
     }
-
+    sam_close(bam_out);
     bam_hdr_destroy(bam_header);
     sam_close(bam_in);
     if (tpool.pool) {
@@ -404,6 +417,7 @@ int main(int argc,char *argv[]){
     }
 //    free(b_array);
     cout<<"close and destroy,cost time:"<<omp_get_wtime()-start_time<<endl;
+    exit(0);
     return 0;
 //    hts_idx_destroy();
 }
@@ -481,10 +495,6 @@ unordered_map<Alignment, unordered_map<umi_type,adj_type>>& align_adjs){
         align_adjs[alignment]=adjs;
     }
 }
-void finalConsumer(htsFile* bam_out,sam_hdr_t* bam_header){
-
-}
-
 
 /**
  * 从read_name/q_name中提取umi
