@@ -39,8 +39,8 @@ alignas(64) unsigned int total_read_count=0;
 unsigned int chunk_N=0;
 bam1_t *** b_array;
 bool* consumer_flags;
-int num_of_consumer=9;
-int num_of_hts=9;
+int num_of_consumer=10;
+int num_of_hts=10;
 //是否在运行时回收内存
 const bool save_memory= false;
 char sep='_';
@@ -141,7 +141,7 @@ void freeBam1_t(unsigned index) {
 
 int main(int argc,char *argv[]){
     cout<<getpid()<<endl;
-    usleep(10000000);
+//    usleep(10000000);
     b_array=(bam1_t***) malloc(sizeof (bam1_t**)*100000);
     consumer_flags= (bool *)calloc(num_of_consumer, sizeof(bool));
     processor_datas= (vector<pair<Alignment , unsigned int >>**)
@@ -157,10 +157,13 @@ int main(int argc,char *argv[]){
         processor_datas[i]=new vector<pair<Alignment , unsigned int >>;
     }
 
+    omp_lock_t write_lock;
+    omp_init_lock(&write_lock);
     omp_set_num_threads(num_of_consumer);
     samFile *bam_in= sam_open(argv[1],"r");
     htsFile *bam_out= hts_open(argv[2],"wb");
     sam_hdr_t *bam_header= sam_hdr_read(bam_in);
+    cout<<"targer name: "<<bam_header->target_name<<endl;
     if (sam_hdr_write(bam_out, bam_header) < 0) {
         cerr << "Error writing output." << endl;
         exit(-1);
@@ -293,7 +296,7 @@ int main(int argc,char *argv[]){
             #pragma omp parallel num_threads(num_of_consumer) reduction(+:dedupedCount,avgUMICount,alignPosCount) reduction(max:maxUMICount)
             {
                 int id = omp_get_thread_num();
-                //cout<<id<<" begin"<<endl;
+//                cout<<id<<" begin"<<endl;
                 unordered_map<Alignment, unordered_map<umi_type, ReadFreq *>> local_align;
                 unordered_map<Alignment, unordered_map<umi_type, adj_type>> align_adjs;
                 vector<unsigned int> poses;
@@ -324,6 +327,7 @@ int main(int argc,char *argv[]){
                         break;
                     }
                 }
+                vector<vector<unsigned int>> dedupeds;
                 //处理完成进入后处理阶段
                 for (auto &tackle_map: align_adjs) {
 
@@ -360,15 +364,35 @@ int main(int argc,char *argv[]){
                     avgUMICount += umi_read.size();
                     maxUMICount = std::max(maxUMICount, (unsigned int)umi_read.size());
                     dedupedCount += deduped.size();
+                    sort(deduped.begin(),deduped.end());
+                    dedupeds.push_back(deduped);
                     //开始写入
-                    #pragma omp critical
-                    {
-                        for(unsigned int b_pos:deduped){
-                            if (sam_write1(bam_out,bam_header, getBam1_t(b_pos))<0){
-                                cerr << "Error writing output." << endl;
-                                exit(-1);
+                    if (omp_test_lock(&write_lock)) {
+                        for (const vector<unsigned int >& one_de:dedupeds) {
+                            for(unsigned int b_pos:one_de){
+                                if (sam_write1(bam_out,bam_header,getBam1_t(b_pos) )<0){
+                                    cerr << "Error writing output." << endl;
+                                    exit(-1);
+                                }
                             }
                         }
+                        omp_unset_lock(&write_lock);
+                        dedupeds.clear();
+                    }
+                }
+                while (true){
+                    if (omp_test_lock(&write_lock)) {
+                        for (const vector<unsigned int >& one_de:dedupeds) {
+                            for(unsigned int b_pos:one_de){
+                                if (sam_write1(bam_out,bam_header,getBam1_t(b_pos) )<0){
+                                    cerr << "Error writing output." << endl;
+                                    exit(-1);
+                                }
+                            }
+                        }
+                        omp_unset_lock(&write_lock);
+                        dedupeds.clear();
+                        break;
                     }
                 }
             }
@@ -417,7 +441,6 @@ int main(int argc,char *argv[]){
     }
 //    free(b_array);
     cout<<"close and destroy,cost time:"<<omp_get_wtime()-start_time<<endl;
-    exit(0);
     return 0;
 //    hts_idx_destroy();
 }
