@@ -5,7 +5,6 @@
 #include <iostream>
 #include <omp.h>
 #include <regex>
-#include <bitset>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -15,6 +14,8 @@
 #include <unistd.h>
 #include <list>
 #include <atomic>
+#include <queue>
+#include <math.h>
 using namespace std;
 
 //using umi_type=bitset<64>  ;
@@ -39,8 +40,8 @@ alignas(64) unsigned int total_read_count=0;
 unsigned int chunk_N=0;
 bam1_t *** b_array;
 bool* consumer_flags;
-int num_of_consumer=15;
-int num_of_hts=17;
+int num_of_consumer=35;
+int num_of_hts=37;
 //是否在运行时回收内存
 const bool save_memory= false;
 char sep='_';
@@ -126,8 +127,33 @@ unsigned int produceChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned in
 void consumeOne(const Alignment& alignment,unsigned int pos,
                 unordered_map<Alignment, unordered_map<umi_type , ReadFreq*>>& local_align,
                 unordered_map<Alignment, unordered_map<umi_type,adj_type>>& align_adjs);
-bam1_t* getBam1_t(unsigned index){
+bam1_t* getBam1_t(unsigned int index){
     return b_array[index/CHUNK_SIZE][index%CHUNK_SIZE];
+}
+unsigned range_per_thread=0;
+//获取排序的分区
+unsigned int get_bucket_index(unsigned int value) {
+    return value / range_per_thread;
+}
+
+bool cmp(unsigned int i1,unsigned int i2){
+//    return (getBam1_t(i1)->core.pos)<(getBam1_t(i2)->core.pos);
+    const bam1_t *rec_a = getBam1_t(i1);
+    const bam1_t *rec_b = getBam1_t(i2);
+    // 比较染色体ID（tid）
+    if (rec_a->core.tid != rec_b->core.tid) {
+        return rec_a->core.tid <rec_b->core.tid;
+    }
+
+    // 比较起始位置（pos）
+    if (rec_a->core.pos != rec_b->core.pos) {
+        return rec_a->core.pos <rec_b->core.pos;
+    }
+
+    // 比对方向：正链（0x10标志位未设置）优先于负链（0x10标志位设置）
+    int is_rev_a = bam_is_rev(rec_a);
+    int is_rev_b = bam_is_rev(rec_b);
+    return is_rev_a < is_rev_b;
 }
 void freeBam1_t(unsigned index) {
     free(b_array[index / CHUNK_SIZE][index % CHUNK_SIZE]->data);
@@ -141,7 +167,7 @@ void freeBam1_t(unsigned index) {
 
 int main(int argc,char *argv[]){
     cout<<getpid()<<endl;
-//    usleep(10000000);
+//    usleep(15000000);
     b_array=(bam1_t***) malloc(sizeof (bam1_t**)*100000);
     consumer_flags= (bool *)calloc(num_of_consumer, sizeof(bool));
     processor_datas= (vector<pair<Alignment , unsigned int >>**)
@@ -185,7 +211,7 @@ int main(int argc,char *argv[]){
     unsigned int read_count=0;
     int init_done=0;
     unsigned int p_total=0;
-    vector<vector<unsigned int>> final_write(num_of_consumer);
+    vector<vector<unsigned int>**> final_write(num_of_consumer);
 #pragma omp parallel sections num_threads(3)
     {
         //初始化读入内存
@@ -289,6 +315,7 @@ int main(int argc,char *argv[]){
                 current_n=toN;
                 //不再有新的，处理完剩余的退出
             }
+            range_per_thread = ceil(static_cast<double>(total_read_count)/ static_cast<double>(num_of_consumer));
             #pragma omp atomic write seq_cst
             read_done= true;
         }
@@ -297,6 +324,11 @@ int main(int argc,char *argv[]){
             #pragma omp parallel num_threads(num_of_consumer) reduction(+:dedupedCount,avgUMICount,alignPosCount) reduction(max:maxUMICount)
             {
                 int id = omp_get_thread_num();
+                //提前分组，便于排序
+                vector<unsigned int >**  local_sort_chunk=(vector<unsigned int >**) malloc(sizeof (vector<unsigned int >*)*num_of_consumer);
+                for (int i = 0; i < num_of_consumer; ++i) {
+                    local_sort_chunk[i]=new vector<unsigned int >();
+                }
 //                cout<<id<<" begin"<<endl;
                 unordered_map<Alignment, unordered_map<umi_type, ReadFreq *>> local_align;
                 unordered_map<Alignment, unordered_map<umi_type, adj_type>> align_adjs;
@@ -328,7 +360,7 @@ int main(int argc,char *argv[]){
                         break;
                     }
                 }
-                vector<unsigned int> dedupeds;
+//                vector<unsigned int> dedupeds;
                 //处理完成进入后处理阶段
                 for (auto &tackle_map: align_adjs) {
 
@@ -355,44 +387,71 @@ int main(int argc,char *argv[]){
                         to_remove.erase(new_end, to_remove.end());
                     }
                     unordered_set<umi_type> visited;
-                    vector<unsigned int> deduped;
+//                    vector<unsigned int> deduped;
                     for (const auto &freq: freqs) {
                         if (visited.count(freq.first) == 0) {
                             visitAndRemoveV2(freq.first, umiMap, visited);
-                            deduped.push_back(freq.second->b);
+//                            deduped.push_back(freq.second->b);
+                            //放入对应分块
+                            local_sort_chunk[get_bucket_index(freq.second->b)]->push_back(freq.second->b);
+                            dedupedCount++;
                         }
                     }
                     avgUMICount += umi_read.size();
                     maxUMICount = std::max(maxUMICount, (unsigned int) umi_read.size());
-                    dedupedCount += deduped.size();
+//                    dedupedCount += deduped.size();
 //                    sort(deduped.begin(), deduped.end());
-                    dedupeds.insert(dedupeds.end(),deduped.begin(),deduped.end());
+//                    dedupeds.insert(dedupeds.end(),deduped.begin(),deduped.end());
                     //开始写入
                 }
-                sort(dedupeds.begin(),dedupeds.end());
-                final_write[id]=dedupeds;
+//                sort(dedupeds.begin(),dedupeds.end());
+                final_write[id]=local_sort_chunk;
+
             }
         }
     }
-//    exit(0);
     cout<<"total read count"<<total_read_count<<endl;
 
-    cout<<"map is over"<<endl;
     cout<<"unmapped number:"<<unmapped<<endl;
+    cout<<"map is over"<<" current time:"<<omp_get_wtime()-start_time<<endl;
+    auto thread_offset= (unsigned long*)malloc(num_of_consumer*sizeof (unsigned long));
+    auto thread_sort=(unsigned int**)malloc(num_of_consumer*sizeof (unsigned int*));
+// 预计算总元素数以优化内存分配
+    #pragma omp parallel
+    {
+        int id = omp_get_thread_num();
+        vector<unsigned int>local_chunk;
+        unsigned long total_size=0;
+        //获取大小
+        for (int i = 0; i < num_of_consumer; ++i) {
+            total_size+=final_write[i][id]->size();
+        }
+        auto* final_array=(unsigned int*) malloc(sizeof(unsigned int)*total_read_count);
+        unsigned long offset=0;
+        //归并vector
+        for (int i = 0; i < num_of_consumer; ++i) {
+            memcpy(&final_array[offset],final_write[i][id]->data(),final_write[i][id]->size()* sizeof(unsigned int));
+            offset+=final_write[i][id]->size();
+        }
 
-    std::vector<unsigned int> merged;
-
-    // 遍历 final_write 中的每个已排序的 vector
-    for (const auto& vec : final_write) {
-        // 使用 std::merge 将当前已排序的 vec 与 merged 合并
-        std::vector<unsigned int> temp(merged.size() + vec.size());
-        std::merge(merged.begin(), merged.end(), vec.begin(), vec.end(), temp.begin());
-        merged = std::move(temp); // 更新 merged 为合并后的结果
+        sort(&final_array[0],&final_array[total_size-1]);
+        thread_offset[id]=total_size;
+        thread_sort[id]=final_array;
     }
-    cout<<"merge done start to write:"<<merged.size()<<endl;
+    auto merge=(unsigned int*) malloc(dedupedCount*sizeof (unsigned int ));
+    unsigned long offset=0;
+    for (int i = 0; i < num_of_consumer; ++i) {
+        memcpy(&merge[offset],thread_sort[i],thread_offset[i]* sizeof(unsigned int));
+        offset+=thread_offset[i];
+    }
+    // 预分配空间
+//    std::vector<unsigned int> merged;
 
-    for(unsigned int b_pos:merged){
-        if (sam_write1(bam_out,bam_header, getBam1_t(b_pos))<0){
+
+    cout<<"merge done start to write:"<<offset<<" current time:"<<omp_get_wtime()-start_time<<endl;
+
+    for (int i = 0; i <dedupedCount ; ++i) {
+        if (sam_write1(bam_out,bam_header, getBam1_t(merge[i]))<0){
             cerr << "Error writing output." << endl;
             exit(-1);
         }
@@ -405,7 +464,7 @@ int main(int argc,char *argv[]){
     cout<<"Average number of UMIs per alignment position\t" <<((double)avgUMICount / alignPosCount)<<endl;
     cout<<"Max number of UMIs over all alignment positions\t" << maxUMICount<<endl;
     cout<<"Number of reads after deduplicating\t" << dedupedCount<<endl;
-    #pragma omp parallel for schedule(dynamic) num_threads(num_of_consumer+num_of_hts)
+    #pragma omp parallel for schedule(dynamic) num_threads(num_of_hts)
     for (int i = 0; i < chunk_N; ++i) {
         unsigned int last=CHUNK_SIZE;
         if (i==CHUNK_SIZE-1){
@@ -442,7 +501,7 @@ int main(int argc,char *argv[]){
  * @return
  */
 unsigned int produceChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned int read_size){
-    int read_count=0;
+    int local_read_counts=0;
     bam1_t** chunk=b_array[chunk_n];
     for (int p_read_count = 0; p_read_count <read_size; ++p_read_count) {
         bam1_t *b = chunk[p_read_count];
@@ -458,6 +517,8 @@ unsigned int produceChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned in
                             get_reference_name(b, bam_header)};
         unsigned long pos_hash= getHash(alignment)%num_of_consumer;
         consumer_local_datas[pos_hash]->emplace_back(alignment,chunk_n*CHUNK_SIZE+p_read_count);
+        local_read_counts++;
+
     }
     for (int i = 0; i < num_of_consumer; ++i) {
 
@@ -474,7 +535,7 @@ unsigned int produceChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned in
         }
 
     }
-    return read_count;
+    return local_read_counts;
 }
 
 
