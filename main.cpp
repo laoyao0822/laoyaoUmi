@@ -15,7 +15,7 @@
 #include <list>
 #include <atomic>
 #include <queue>
-#include <math.h>
+#include <cmath>
 using namespace std;
 
 //using umi_type=bitset<64>  ;
@@ -116,7 +116,6 @@ unsigned long getHash(const Alignment& ali){
     return (hash<bool>()(!ali.isReversed)^hash<string>()(ali.refName) ^ hash<int64_t>()(ali.pos)) ;
 }
 //unordered_map<Alignment, unordered_map<umi_type , ReadFreq*>> alignmentMap;
-unordered_set<umi_type> near(const vector<pair<umi_type,ReadFreq*>>& freqs,const umi_type& umi, int maxFreq);
 void visitAndRemove(const umi_type & u,unordered_map<umi_type, unordered_set<umi_type>>& adj,
                     unordered_set<umi_type>& visited);
 void visitAndRemoveV2(const umi_type & u,
@@ -183,14 +182,12 @@ int main(int argc,char *argv[]){
         processor_datas[i]=new vector<pair<Alignment , unsigned int >>;
     }
 
-    omp_lock_t write_lock;
-    omp_init_lock(&write_lock);
     omp_set_num_threads(num_of_consumer);
     samFile *bam_in= sam_open(argv[1],"r");
-    samFile *bam_out= sam_open(argv[2],"wb");
+    htsFile *bam_out= hts_open(argv[2],"wb");
     sam_hdr_t *bam_header= sam_hdr_read(bam_in);
     cout<<"targer name: "<<bam_header->target_name<<endl;
-    if (sam_hdr_write(bam_out, bam_hdr_dup(bam_header)) < 0) {
+    if (sam_hdr_write(bam_out, bam_header) < 0) {
         cerr << "Error writing output." << endl;
         exit(-1);
     }
@@ -387,11 +384,9 @@ int main(int argc,char *argv[]){
                         to_remove.erase(new_end, to_remove.end());
                     }
                     unordered_set<umi_type> visited;
-//                    vector<unsigned int> deduped;
                     for (const auto &freq: freqs) {
                         if (visited.count(freq.first) == 0) {
                             visitAndRemoveV2(freq.first, umiMap, visited);
-//                            deduped.push_back(freq.second->b);
                             //放入对应分块
                             local_sort_chunk[get_bucket_index(freq.second->b)]->push_back(freq.second->b);
                             dedupedCount++;
@@ -399,12 +394,9 @@ int main(int argc,char *argv[]){
                     }
                     avgUMICount += umi_read.size();
                     maxUMICount = std::max(maxUMICount, (unsigned int) umi_read.size());
-//                    dedupedCount += deduped.size();
-//                    sort(deduped.begin(), deduped.end());
-//                    dedupeds.insert(dedupeds.end(),deduped.begin(),deduped.end());
+
                     //开始写入
                 }
-//                sort(dedupeds.begin(),dedupeds.end());
                 final_write[id]=local_sort_chunk;
 
             }
@@ -593,32 +585,6 @@ umi_type extractUMI(const std::string& readName) {
         return result;
     }
     result=readName.substr(sepPos + 1);
-//    string umi_str=readName.substr(sepPos + 1);  // `sepPos + 1` 是跳过分隔符字符
-//    cout<<"umi: "<<umi_str<<endl;
-
-//    for (const char c : umi_str) {
-//        const auto it = ENCODING_MAP.find(c);
-//        if (it == ENCODING_MAP.end()) {
-//            cout<<" un use it:"<<c<<endl;
-//            return result;  // 遇到無效字符返回空bitset
-//        }
-//
-//
-//        const uint8_t code = it->second;
-//        // 將3bit編碼按高位到低位依次寫入bitset
-//        for (int shift = 2; shift >= 0; --shift) {
-//            if (bit_pos >= result.size()) {
-//                cout<<"being cuted "<<endl;
-//                return result;  // 超過最大長度時截斷
-//            }
-//            result.set(bit_pos++, (code >> shift) & 0x1);
-//        }
-////        for (int shift = 0; shift < 3; ++shift) { // 修改循环方向
-////            if (bit_pos >= result.size()) return result;
-////            result.set(bit_pos++, (code >> shift) & 0x1);
-////        }
-//    }
-//    cout<<"umi bitset: "<<result.to_string()<<endl;
 
     // 提取分隔符后的部分，即 UMI
     return result;
@@ -636,7 +602,7 @@ score_type get_avg_qual(bam1_t* b){
     for (int j = 0; j < read_length; ++j) {
         sum_qual+=qual[j];
     }
-    int avg_qual = (sum_qual) / read_length;
+    score_type avg_qual = static_cast<score_type>(sum_qual) / read_length;
     return avg_qual;
 }
 /**
