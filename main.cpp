@@ -20,7 +20,7 @@ using namespace std;
 
 //using umi_type=bitset<64>  ;
 using umi_type=string  ;
-using score_type=int;
+using score_type=double;
 using adj_type=vector<umi_type>;
 score_type get_avg_qual(bam1_t* b);
 // Initialize the static member
@@ -43,7 +43,7 @@ bool* consumer_flags;
 int num_of_consumer=35;
 int num_of_hts=37;
 //是否在运行时回收内存
-const bool save_memory= false;
+const bool save_memory= true;
 char sep='_';
 //a,c,g,t之间的编码不同的位数都是2
 const int ENCODING_DIST=2;
@@ -187,10 +187,10 @@ int main(int argc,char *argv[]){
     omp_init_lock(&write_lock);
     omp_set_num_threads(num_of_consumer);
     samFile *bam_in= sam_open(argv[1],"r");
-    htsFile *bam_out= hts_open(argv[2],"wb");
+    samFile *bam_out= sam_open(argv[2],"wb");
     sam_hdr_t *bam_header= sam_hdr_read(bam_in);
     cout<<"targer name: "<<bam_header->target_name<<endl;
-    if (sam_hdr_write(bam_out, bam_header) < 0) {
+    if (sam_hdr_write(bam_out, bam_hdr_dup(bam_header)) < 0) {
         cerr << "Error writing output." << endl;
         exit(-1);
     }
@@ -434,7 +434,8 @@ int main(int argc,char *argv[]){
             offset+=final_write[i][id]->size();
         }
 
-        sort(&final_array[0],&final_array[total_size-1]);
+        sort(final_array,final_array+total_size);
+
         thread_offset[id]=total_size;
         thread_sort[id]=final_array;
     }
@@ -444,6 +445,12 @@ int main(int argc,char *argv[]){
         memcpy(&merge[offset],thread_sort[i],thread_offset[i]* sizeof(unsigned int));
         offset+=thread_offset[i];
     }
+    for (int i = 1; i < offset; ++i) {
+        if(merge[i]<merge[i-1]){
+            cout<<"error"<<i<<endl;
+        }
+    }
+
     // 预分配空间
 //    std::vector<unsigned int> merged;
 
