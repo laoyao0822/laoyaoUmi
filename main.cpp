@@ -40,8 +40,8 @@ alignas(64) unsigned int total_read_count=0;
 unsigned int chunk_N=0;
 bam1_t *** b_array;
 bool* consumer_flags;
-int num_of_consumer=13;
-int num_of_hts=14;
+int num_of_consumer=33;
+int num_of_hts=34;
 //是否在运行时回收内存
 const bool save_memory= true;
 char sep='_';
@@ -439,7 +439,7 @@ int main(int argc,char *argv[]){
     // 预分配空间
 //    std::vector<unsigned int> merged;
     std::string base_output_path = argv[2];
-    htsFile *bam_out;
+    htsFile **bam_out_array= (htsFile**)calloc(sizeof(htsFile*),300);
     string outputPath=base_output_path;
     cout<<"merge done start to write:"<<offset<<" current time:"<<omp_get_wtime()-start_time<<endl;
     int32_t tid=2005082211;
@@ -447,26 +447,27 @@ int main(int argc,char *argv[]){
     for (int i = 0; i <dedupedCount ; ++i) {
         bam1_t* t1=getBam1_t(merge[i]);
         if (t1->core.tid!=tid){
-            case_name++;
             tid=t1->core.tid;
             string r_name=string(bam_header->target_name[t1->core.tid]);
             if (r_name.size()>3){
                 continue;
             }
+            case_name++;
             cout<<r_name<<endl;
             if (case_name<10) {
-                outputPath = base_output_path + "part0" + to_string(case_name) + ".bam";
+                outputPath = base_output_path + "part0" + to_string(case_name) + ".sam";
             } else{
-                outputPath = base_output_path + "part" + to_string(case_name) + ".bam";
+                outputPath = base_output_path + "part" + to_string(case_name) + ".sam";
             }
-            bam_out= hts_open(outputPath.data(),"wb");
-            hts_set_opt(bam_out, HTS_OPT_THREAD_POOL, &tpool);
-            if (sam_hdr_write(bam_out, bam_header) < 0) {
+            sam_close(bam_out_array[case_name-1]);
+            bam_out_array[case_name]= hts_open(outputPath.data(),"w");
+            hts_set_opt(bam_out_array[case_name], HTS_OPT_THREAD_POOL, &tpool);
+            if (sam_hdr_write(bam_out_array[case_name], bam_header) < 0) {
                 cerr << "Error writing output." << endl;
                 exit(-1);
             }
         }
-        if (sam_write1(bam_out,bam_header,t1)<0){
+        if (sam_write1(bam_out_array[case_name],bam_header,t1)<0){
             cerr << "Error writing output." << endl;
             exit(-1);
         }
@@ -497,7 +498,7 @@ int main(int argc,char *argv[]){
         }
         free(to_destroy);
     }
-    sam_close(bam_out);
+    sam_close(bam_out_array[case_name]);
     bam_hdr_destroy(bam_header);
     sam_close(bam_in);
     if (tpool.pool) {
