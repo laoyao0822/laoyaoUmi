@@ -40,8 +40,8 @@ alignas(64) unsigned int total_read_count=0;
 unsigned int chunk_N=0;
 bam1_t *** b_array;
 bool* consumer_flags;
-int num_of_consumer=35;
-int num_of_hts=37;
+int num_of_consumer=13;
+int num_of_hts=14;
 //是否在运行时回收内存
 const bool save_memory= true;
 char sep='_';
@@ -184,20 +184,13 @@ int main(int argc,char *argv[]){
 
     omp_set_num_threads(num_of_consumer);
     samFile *bam_in= sam_open(argv[1],"r");
-    htsFile *bam_out= hts_open(argv[2],"wb");
-    sam_hdr_t *bam_header= sam_hdr_read(bam_in);
-    cout<<"targer name: "<<bam_header->target_name<<endl;
-    if (sam_hdr_write(bam_out, bam_header) < 0) {
-        cerr << "Error writing output." << endl;
-        exit(-1);
-    }
 
+    sam_hdr_t *bam_header= sam_hdr_read(bam_in);
     cout<<argv[1]<<endl;
     htsThreadPool tpool = {NULL, 0};
     tpool.pool = hts_tpool_init(num_of_hts);
     if (tpool.pool) {
         hts_set_opt(bam_in, HTS_OPT_THREAD_POOL, &tpool);
-        hts_set_opt(bam_out, HTS_OPT_THREAD_POOL, &tpool);
     }
 //    hts_set_threads(bam_in,20);
 //    hts_set_threads(bam_out,20);
@@ -445,12 +438,35 @@ int main(int argc,char *argv[]){
 
     // 预分配空间
 //    std::vector<unsigned int> merged;
-
-
+    std::string base_output_path = argv[2];
+    htsFile *bam_out;
+    string outputPath=base_output_path;
     cout<<"merge done start to write:"<<offset<<" current time:"<<omp_get_wtime()-start_time<<endl;
-
+    int32_t tid=2005082211;
+    int case_name=0;
     for (int i = 0; i <dedupedCount ; ++i) {
-        if (sam_write1(bam_out,bam_header, getBam1_t(merge[i]))<0){
+        bam1_t* t1=getBam1_t(merge[i]);
+        if (t1->core.tid!=tid){
+            case_name++;
+            tid=t1->core.tid;
+            string r_name=string(bam_header->target_name[t1->core.tid]);
+            if (r_name.size()>3){
+                continue;
+            }
+            cout<<r_name<<endl;
+            if (case_name<10) {
+                outputPath = base_output_path + "part0" + to_string(case_name) + ".bam";
+            } else{
+                outputPath = base_output_path + "part" + to_string(case_name) + ".bam";
+            }
+            bam_out= hts_open(outputPath.data(),"wb");
+            hts_set_opt(bam_out, HTS_OPT_THREAD_POOL, &tpool);
+            if (sam_hdr_write(bam_out, bam_header) < 0) {
+                cerr << "Error writing output." << endl;
+                exit(-1);
+            }
+        }
+        if (sam_write1(bam_out,bam_header,t1)<0){
             cerr << "Error writing output." << endl;
             exit(-1);
         }
