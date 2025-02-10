@@ -48,6 +48,7 @@ char sep='_';
 //a,c,g,t之间的编码不同的位数都是2
 const int ENCODING_DIST=2;
 
+bool filter_rlen= true;
 
 
 const std::unordered_map<char, uint8_t> ENCODING_MAP{
@@ -85,7 +86,7 @@ struct ReadFreq {
         this->score=score;
     }
     void merge(unsigned int b2,score_type b2_score){
-        if (b2_score > this->score){
+        if (b2_score >= this->score){
             if (save_memory) {
                 freeBam1_t(this->b);
             }
@@ -155,9 +156,23 @@ bool cmp(unsigned int i1,unsigned int i2){
     return is_rev_a < is_rev_b;
 }
 void freeBam1_t(unsigned index) {
-    free(b_array[index / CHUNK_SIZE][index % CHUNK_SIZE]->data);
-    free(b_array[index / CHUNK_SIZE][index % CHUNK_SIZE]);
+//    free(b_array[index / CHUNK_SIZE][index % CHUNK_SIZE]->data);
+//    free(b_array[index / CHUNK_SIZE][index % CHUNK_SIZE]);
+    bam_destroy1(b_array[index / CHUNK_SIZE][index % CHUNK_SIZE]);
     b_array[index / CHUNK_SIZE][index % CHUNK_SIZE] = nullptr;
+}
+int32_t get_ref_length(bam1_t *b) {
+    uint32_t *cigar = bam_get_cigar(b);
+    int32_t ref_len = 0;
+    for (int i = 0; i < b->core.n_cigar; ++i) {
+        uint32_t op = cigar[i];
+        char c = "MIDNSHP=XB"[op & BAM_CIGAR_MASK];
+        int len = op >> BAM_CIGAR_SHIFT;
+        if (c == 'M' || c == 'D' || c == 'N' || c == '=' || c == 'X') {
+            ref_len += len;
+        }
+    }
+    return ref_len;
 }
 //bam1_t *bam_initV2(void)
 //{
@@ -557,6 +572,14 @@ void consumeOne(const Alignment& alignment,unsigned int pos,
                 unordered_map<Alignment, unordered_map<umi_type , ReadFreq*>>& local_align,
 unordered_map<Alignment, unordered_map<umi_type,adj_type>>& align_adjs){
     bam1_t * b= getBam1_t(pos);
+    if (filter_rlen){
+        if (get_ref_length(b)>=100000){
+            if (save_memory){
+                freeBam1_t(pos);
+            }
+            return;
+        }
+    }
     string q_name= bam_get_qname(b);
     umi_type umi= extractUMI(q_name);
     score_type score= get_avg_qual(b);
@@ -582,6 +605,7 @@ unordered_map<Alignment, unordered_map<umi_type,adj_type>>& align_adjs){
         adjs[umi]=one_adj;
         align_adjs[alignment]=adjs;
     }
+
 }
 
 /**
