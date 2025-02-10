@@ -12,9 +12,11 @@
 #include <algorithm>
 #include "htslib/thread_pool.h"
 #include <unistd.h>
+#include <fstream>
 #include <list>
 #include <atomic>
 #include <queue>
+#include <getopt.h>
 #include <cmath>
 using namespace std;
 
@@ -31,9 +33,9 @@ int unmapped=0;
 unsigned int alignPosCount=0 ;
 unsigned int avgUMICount=0 ,maxUMICount=0,dedupedCount=0 ;
 //near的乘值
-double percentage = 0.5f;
+double percentage = 0.5f;//p
 //near的系数
-int k=1;
+int k=1; // k
 bool read_done= false;
 const unsigned int CHUNK_SIZE=1000000;
 alignas(64) unsigned int total_read_count=0;
@@ -42,13 +44,14 @@ bam1_t *** b_array;
 bool* consumer_flags;
 int num_of_consumer=33;
 int num_of_hts=34;
+int thread_num = 16;
 //是否在运行时回收内存
-const bool save_memory= true;
+bool save_memory= false; //-save
 char sep='_';
 //a,c,g,t之间的编码不同的位数都是2
 const int ENCODING_DIST=2;
 
-bool filter_rlen= true;
+bool filter_rlen= false; //rlen
 
 
 const std::unordered_map<char, uint8_t> ENCODING_MAP{
@@ -179,8 +182,115 @@ int32_t get_ref_length(bam1_t *b) {
 //    return (bam1_t*)malloc( sizeof(bam1_t));
 //}
 
-int main(int argc,char *argv[]){
-//    usleep(15000000);
+bool fileExist (string& filename) {
+    ifstream file(filename);
+    return file.good();
+}
+
+//参数解析
+static const char *short_options = "i:o:t:p:k:fs"; 
+static struct option long_options[] {
+    {"input",  required_argument, 0, 'i'},
+    {"output",  required_argument, 0, 'o'},
+    {"thread", required_argument, 0, 't'},
+    {"percentage", required_argument, 0, 'p'},
+    {"k-near", required_argument, 0, 'k'},
+    {"filter", no_argument, 0, 'f'},
+    {"save-memory", no_argument, 0, 's'},
+    {0, 0, 0, 0}
+};
+
+
+
+string inputFile, outputFilePath;
+
+static void parseOption(int next_option, const char *optarg) {
+    switch (next_option) {
+        case 'i': {
+            inputFile = optarg;
+            if (!fileExist(inputFile)) {
+                cout << "The input file is not exist" << endl;
+                throw (1);
+            }
+            break;
+        }
+        case 'o': {
+            outputFilePath = optarg;
+            if(outputFilePath.empty()) {
+                cout << "the outputFilePath is emtpy" << endl;
+                throw(1);
+            }
+            break;
+        }
+        case 't': {
+            try {
+                thread_num = stoi(optarg);
+            } catch(...) {
+                cout << "the type of thread_num is integer" << endl;
+                throw 1;
+            }
+            num_of_consumer = thread_num - 3;
+            num_of_hts = thread_num - 1;
+            break;
+        }
+        case 'p': {
+            try {
+                percentage = std::stof(optarg); 
+            } catch(...) {
+                cout << "the type of the percentage is float" << endl;
+                throw 1;
+            }
+            break;
+        }
+        case 'k': {
+            try {
+                k = stoi(optarg);
+            } catch (...) {
+                cout << "the type of the k-near is integer" << endl;
+            }
+            break;
+        }
+        case 'f': {
+            filter_rlen = true; //默认为false
+            break;
+        }
+        case 's': {
+            save_memory = true; //默认为false
+            break;
+        }
+
+        default:
+            cout << "please check the arguments" << endl;
+            throw 1;
+    } 
+}
+static void parseOptions(int argc, const char **argv) {
+    int option_index = 0;
+    int next_option;
+    while(true) {
+        next_option = getopt_long(argc, const_cast<char **>(argv), short_options, long_options, &option_index);
+        if(next_option == -1)
+            break;
+        parseOption(next_option, optarg);
+    }
+    if(inputFile.empty()){
+        cerr << "Error Non Input" << endl;
+        exit(-1);
+    }
+    if(outputFilePath.empty()){
+        cerr << "Error Non output" << endl;
+        exit(-1);
+    }
+
+}
+
+int main(int argc, const char** argv){
+    try {
+        parseOptions(argc, argv);
+    } catch(...) {
+        cerr << "some wrong happened when parse the options" << endl;
+        return 1;
+    }
     b_array=(bam1_t***) malloc(sizeof (bam1_t**)*100000);
     consumer_flags= (bool *)calloc(num_of_consumer, sizeof(bool));
     processor_datas= (vector<pair<Alignment , unsigned int >>**)
@@ -197,8 +307,8 @@ int main(int argc,char *argv[]){
     }
 
     omp_set_num_threads(num_of_consumer);
-    samFile *bam_in= sam_open(argv[1],"r");
-
+    samFile *bam_in;
+    bam_in = sam_open(inputFile.c_str(),"r");  //argument 1
     sam_hdr_t *bam_header= sam_hdr_read(bam_in);
     htsThreadPool tpool = {NULL, 0};
     tpool.pool = hts_tpool_init(num_of_hts);
@@ -451,7 +561,10 @@ int main(int argc,char *argv[]){
 
     // 预分配空间
 //    std::vector<unsigned int> merged;
-    std::string base_output_path = argv[2];
+
+
+    std::string base_output_path = outputFilePath; //argument 2
+
     htsFile **bam_out_array= (htsFile**)calloc(sizeof(htsFile*),300);
     string outputPath=base_output_path;
     cout<<"merge done start to write:"<<offset<<" current time:"<<omp_get_wtime()-start_time<<endl;
