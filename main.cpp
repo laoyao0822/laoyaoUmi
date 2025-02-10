@@ -89,7 +89,7 @@ struct ReadFreq {
         this->score=score;
     }
     void merge(unsigned int b2,score_type b2_score){
-        if (b2_score >= this->score){
+        if (b2_score > this->score){
             if (save_memory) {
                 freeBam1_t(this->b);
             }
