@@ -598,14 +598,21 @@ int main(int argc, const char** argv){
             exit(-1);
         }
     }
-
-//    bam_destroy1(b);
     cout<<"sum is "<<read_count<<",cost time:"<<omp_get_wtime()-start_time<<endl;
     cout<<"Number of unremoved reads\t" <<read_count<<endl;
     cout<<"Number of unique alignment positions\t" <<alignPosCount<<endl;
     cout<<"Average number of UMIs per alignment position\t" <<((double)avgUMICount / alignPosCount)<<endl;
     cout<<"Max number of UMIs over all alignment positions\t" << maxUMICount<<endl;
     cout<<"Number of reads after deduplicating\t" << dedupedCount<<endl;
+    sam_close(bam_in);
+    sam_close(bam_out_array[case_name]);
+    bam_hdr_destroy(bam_header);
+//    if (tpool.pool) {
+//        hts_tpool_destroy(tpool.pool);  // Must be done AFTER sam_close()
+//    }
+    cout<<"close and destroy,cost time:"<<omp_get_wtime()-start_time<<endl;
+    exit(0);
+//    bam_destroy1(b);
     #pragma omp parallel for schedule(dynamic) num_threads(num_of_hts)
     for (int i = 0; i < chunk_N; ++i) {
         unsigned int last=CHUNK_SIZE;
@@ -624,14 +631,7 @@ int main(int argc, const char** argv){
         }
         free(to_destroy);
     }
-    sam_close(bam_out_array[case_name]);
-    bam_hdr_destroy(bam_header);
-    sam_close(bam_in);
-    if (tpool.pool) {
-        hts_tpool_destroy(tpool.pool);  // Must be done AFTER sam_close()
-    }
 //    free(b_array);
-    cout<<"close and destroy,cost time:"<<omp_get_wtime()-start_time<<endl;
     return 0;
 //    hts_idx_destroy();
 }
@@ -707,6 +707,7 @@ unordered_map<Alignment, unordered_map<umi_type,adj_type>>& align_adjs){
         //将结果放入对应adj,根据dist筛选
         unordered_map<umi_type,adj_type>adjs=align_adjs[alignment];
         adj_type one_adj;
+        //提前计算每个umi之间的距离
         for (auto & iter : umiMap) {
             int dist=umi_dist(iter.first,umi);
             if (dist<=k){
