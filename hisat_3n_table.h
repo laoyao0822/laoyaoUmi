@@ -97,11 +97,11 @@ void hisat_3n_table(unsigned int *merge, int laoyaoStart, int laoyaoEnd,
             positions.loadMore();
             positions.reloadPos += loadingBlockSize;
         }
+        newAlignment->parseInfo(b, bam_header);
         if (needFilter && !newAlignment->parse_cigar(qlen, sclen))
         {
             continue;
         }
-        newAlignment->parseInfo(b, bam_header);
         positions.appendPositions(*newAlignment);
     }
 

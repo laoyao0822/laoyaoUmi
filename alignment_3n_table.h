@@ -25,7 +25,6 @@
 #include "utility_3n_table.h"
 #include "sam.h"
 
-
 extern char convertFrom;
 extern char convertTo;
 extern char convertFromComplement;
@@ -298,7 +297,14 @@ public:
 
         // 5. 获取 mapping quality (MAPQ)
         mapQ = std::to_string(b->core.qual);
-        unique = (b->core.qual >= 1);
+        if (mapQ == "1")
+        {
+            unique = false;
+        }
+        else
+        {
+            unique = true;
+        }
 
         // 6. 解析 CIGAR 字符串
         uint32_t *cigar = bam_get_cigar(b);
