@@ -575,7 +575,7 @@ int main(int argc, const char** argv){
     //对0号
     int case_name=0;
     int32_t tid= getBam1_t(merge[0])->core.tid;
-    outputPath = base_output_path + "part" + to_string(case_name+1);
+    outputPath = base_output_path;
     int laoyaoStart = 0;
 
     for (int i = 0; i <dedupedCount ; ++i) {
@@ -590,38 +590,37 @@ int main(int argc, const char** argv){
                 continue;
             }
             //必须在这里提交任务
-            h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath](){
-                hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "_unique_unfilter.tsv", true, false, false);
+            h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath, case_name](){
+                hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "unfiltered_unique." + "part" + to_string(case_name+1) + ".tsv", true, false, false);
             });
-            h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath](){
-                hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "_multi_unfilter.tsv", false, true, false);
+            h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath, case_name](){
+                hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "unfiltered_multi." + "part" + to_string(case_name+1) + ".tsv", false, true, false);
             });
-            h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath](){
-                hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "_unique_filter.tsv", true, false, true);
+            h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath, case_name](){
+                hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "filtered_unique." + "part" + to_string(case_name+1) + ".tsv", true, false, true);
             });
-            h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath](){
-                hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "_multi_filter.tsv", false, true, true);
+            h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath, case_name](){
+                hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "filtered_multi." + "part" + to_string(case_name+1) +  ".tsv", false, true, true);
             });
             case_name++;
             laoyaoStart = i;
 
-            outputPath = base_output_path + "part" + to_string(case_name+1);
             
         } 
     }
 
     int i = dedupedCount;
-    h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath](){
-        hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "_unique_unfilter.tsv", true, false, false);
+    h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath, case_name](){
+        hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "unfiltered_unique." + "part" + to_string(case_name+1) + ".tsv", true, false, false);
     });
-    h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath](){
-        hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "_multi_unfilter.tsv", false, true, false);
+    h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath, case_name](){
+        hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "unfiltered_multi." + "part" + to_string(case_name+1) + ".tsv", false, true, false);
     });
-    h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath](){
-        hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "_unique_filter.tsv", true, false, true);
+    h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath, case_name](){
+        hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "filtered_unique." + "part" + to_string(case_name+1) + ".tsv", true, false, true);
     });
-    h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath](){
-        hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "_multi_filter.tsv", false, true, true);
+    h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath, case_name](){
+        hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "filtered_multi." + "part" + to_string(case_name+1) +  ".tsv", false, true, true);
     });
 
     h3tThreadPool.stop_pool();
