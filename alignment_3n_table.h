@@ -38,7 +38,7 @@ using namespace std;
 class Alignment
 {
 public:
-    string readName;
+    //string readName;
     string chromosome;
     long long int location;
     long long int mateLocation;
@@ -125,7 +125,7 @@ public:
         {
             if (count == 0)
             {
-                readName = line->substr(startPosition, endPosition - startPosition);
+                string readName = line->substr(startPosition, endPosition - startPosition);
                 getNameHash(readName);
             }
             else if (count == 1)
@@ -271,11 +271,12 @@ public:
         }
 
         // 1. 获取查询名称 (QNAME)
-        readName = bam_get_qname(b);
+        string readName = bam_get_qname(b);
         if (readName.empty())
         {
             throw std::runtime_error("Empty read name");
         }
+        getNameHash(readName);
 
         // 2. 解析 FLAG
         flag = b->core.flag;
