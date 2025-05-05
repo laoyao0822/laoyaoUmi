@@ -6,11 +6,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_C_COMPILER "icx")
 set(CMAKE_CXX_COMPILER "icpx")
 
+set(HTSLIB_DIR "" CACHE PATH "Path to htslib")
+
 # 指定库文件的路径
-link_directories("/root/m5C/htslib-1.21")
+link_directories(${HTSLIB_DIR})
 
 # 添加包含头文件的路径
-include_directories("/root/m5C/htslib-1.21/htslib")
+include_directories(${HTSLIB_DIR}/htslib)
 
 # 添加当前目录到头文件搜索路径
 include_directories(${CMAKE_SOURCE_DIR})
@@ -50,7 +52,3 @@ add_executable(
 # 链接到指定的 libhts.so
 target_link_libraries(laoyaoUmi "/root/m5C/htslib-1.21/libhts.so")
 
-# 链接 htslib
-target_include_directories(laoyaoUmi PRIVATE ${HTSLIB_INCLUDE_DIRS})
-target_link_directories(laoyaoUmi PRIVATE ${HTSLIB_LIBRARY_DIRS})
-target_link_libraries(laoyaoUmi PRIVATE ${HTSLIB_LIBRARIES})

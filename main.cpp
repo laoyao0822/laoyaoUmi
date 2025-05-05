@@ -53,6 +53,7 @@ bool save_memory= false; //-save
 char sep='_';
 //a,c,g,t之间的编码不同的位数都是2
 const int ENCODING_DIST=2;
+string refFileName;
 
 bool filter_rlen= false; //rlen
 
@@ -200,6 +201,7 @@ static struct option long_options[] {
     {"k-near", required_argument, 0, 'k'},
     {"filter", no_argument, 0, 'f'},
     {"save-memory", no_argument, 0, 's'},
+    {"ref", required_argument, 0, 'r' },
     {0, 0, 0, 0}
 };
 
@@ -259,6 +261,10 @@ static void parseOption(int next_option, const char *optarg) {
         }
         case 's': {
             save_memory = true; //默认为false
+            break;
+        }
+        case 'r': {
+            refFileName = optarg;
             break;
         }
 
@@ -527,7 +533,7 @@ int main(int argc, const char** argv){
     cout<<"map is over"<<" current time:"<<omp_get_wtime()-start_time<<endl;
     auto thread_offset= (unsigned long*)malloc(num_of_consumer*sizeof (unsigned long));
     auto thread_sort=(unsigned int**)malloc(num_of_consumer*sizeof (unsigned int*));
-// 预计算总元素数以优化内存分配
+    // 预计算总元素数以优化内存分配
     #pragma omp parallel
     {
         int id = omp_get_thread_num();
@@ -564,6 +570,8 @@ int main(int argc, const char** argv){
 
     // 预分配空间
 //    std::vector<unsigned int> merged;
+
+
 
     ThreadPool h3tThreadPool(60);
 

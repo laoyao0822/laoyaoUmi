@@ -32,7 +32,7 @@ using namespace std;
 
 string alignmentFileName;
 bool standardInMode = false;
-string refFileName;
+extern string refFileName;
 char convertFrom = 'C';
 char convertTo = 'T';
 char convertFromComplement = asc2dnacomp[convertFrom];
@@ -63,7 +63,7 @@ void hisat_3n_table(unsigned int *merge, int laoyaoStart, int laoyaoEnd,
         return;
     }
 
-    positions.refFile.open("/root/m5C/data/ref/Homo_sapiens.GRCh38.dna.primary_assembly.fa", ios_base::in); //硬编码！请注意参考文件路径
+    positions.refFile.open(refFileName, ios_base::in); //硬编码！请注意参考文件路径
     positions.LoadChromosomeNamesPos();
 
     string chromosome;
