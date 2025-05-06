@@ -50,5 +50,5 @@ add_executable(
 )
 
 # 链接到指定的 libhts.so
-target_link_libraries(laoyaoUmi "/root/m5C/htslib-1.21/libhts.so")
+target_link_libraries(laoyaoUmi ${HTSLIB_DIR}/libhts.so)
 
