@@ -1,7 +1,10 @@
 //
 // Created by laoyao on 2025/1/27.
 //
-#include "sam.h"
+#include "htslib/sam.h"
+
+// #include "sam.h"
+
 #include <iostream>
 #include "hisat_3n_table.h"
 #include "ThreadPool.h"
@@ -12,7 +15,8 @@
 #include <vector>
 #include <unordered_set>
 #include <algorithm>
-#include "thread_pool.h"
+// #include "thread_pool.h"
+#include "htslib/thread_pool.h"
 #include <unistd.h>
 #include <fstream>
 #include <list>
@@ -73,9 +77,10 @@ const char* get_reference_name(bam1_t *b, sam_hdr_t *header);
 struct laoyaoAlignment {
     bool isReversed;
     int64_t pos;
-    string refName;
+    int32_t tid;
+    // string refName;
     bool operator==(const laoyaoAlignment &other) const {
-        return isReversed == other.isReversed && pos == other.pos && refName == other.refName;
+        return isReversed == other.isReversed && pos == other.pos && tid == other.tid;
     }
 };
 void freeBam1_t(unsigned index);
@@ -116,12 +121,12 @@ namespace std {
     template <>
     struct hash<laoyaoAlignment> {
         size_t operator()(const laoyaoAlignment &a) const {
-            return hash<string>()(a.refName) ^ hash<int64_t>()(a.pos) ^ hash<bool>()(a.isReversed);
+            return hash<int32_t>()(a.tid) ^ hash<int64_t>()(a.pos) ^ hash<bool>()(a.isReversed);
         }
     };
 }
 unsigned long getHash(const laoyaoAlignment& ali){
-    return (hash<bool>()(!ali.isReversed)^hash<string>()(ali.refName) ^ hash<int64_t>()(ali.pos)) ;
+    return (hash<bool>()(!ali.isReversed)^hash<int32_t>()(ali.tid) ^ hash<int64_t>()(ali.pos)) ;
 }
 //unordered_map<Alignment, unordered_map<umi_type , ReadFreq*>> alignmentMap;
 void visitAndRemove(const umi_type & u,unordered_map<umi_type, unordered_set<umi_type>>& adj,
@@ -137,20 +142,17 @@ void consumeOne(const laoyaoAlignment& alignment,unsigned int pos,
 bam1_t* getBam1_t(unsigned int index){
     return b_array[index/CHUNK_SIZE][index%CHUNK_SIZE];
 }
-unsigned range_per_thread=0;
-//获取排序的分区
-unsigned int get_bucket_index(unsigned int value) {
-    return value / range_per_thread;
-}
+
+
 
 bool cmp(unsigned int i1,unsigned int i2){
 //    return (getBam1_t(i1)->core.pos)<(getBam1_t(i2)->core.pos);
     const bam1_t *rec_a = getBam1_t(i1);
     const bam1_t *rec_b = getBam1_t(i2);
     // 比较染色体ID（tid）
-    if (rec_a->core.tid != rec_b->core.tid) {
-        return rec_a->core.tid <rec_b->core.tid;
-    }
+    // if (rec_a->core.tid != rec_b->core.tid) {
+    //     return rec_a->core.tid <rec_b->core.tid;
+    // }
 
     // 比较起始位置（pos）
     if (rec_a->core.pos != rec_b->core.pos) {
@@ -161,6 +163,21 @@ bool cmp(unsigned int i1,unsigned int i2){
     int is_rev_a = bam_is_rev(rec_a);
     int is_rev_b = bam_is_rev(rec_b);
     return is_rev_a < is_rev_b;
+}
+
+bool cmp(const laoyaoAlignment rec_a,const laoyaoAlignment rec_b){
+    //    return (getBam1_t(i1)->core.pos)<(getBam1_t(i2)->core.pos);
+
+
+    // 比较起始位置（pos）
+    if (rec_a.pos != rec_b.pos) {
+        return rec_a.pos < rec_b.pos;
+    }
+
+    if (rec_a.isReversed != rec_b.isReversed) {
+        return rec_a.isReversed < rec_b.isReversed;
+    }
+    return rec_a.tid < rec_b.tid;;
 }
 void freeBam1_t(unsigned index) {
 //    free(b_array[index / CHUNK_SIZE][index % CHUNK_SIZE]->data);
@@ -302,12 +319,15 @@ int main(int argc, const char** argv){
     }
     b_array=(bam1_t***) malloc(sizeof (bam1_t**)*100000);
     consumer_flags= (bool *)calloc(num_of_consumer, sizeof(bool));
+
     processor_datas= (vector<pair<laoyaoAlignment , unsigned int >>**)
             malloc(sizeof (vector<pair<laoyaoAlignment , unsigned int >>*)*num_of_consumer);
+
     consumer_local_datas=(vector<pair<laoyaoAlignment , unsigned int >>**)
             malloc(sizeof (vector<pair<laoyaoAlignment , unsigned int >>*)*num_of_consumer);
     omp_set_max_active_levels(2);
     omp_set_dynamic(0);
+
     for (int i = 0; i < num_of_consumer; ++i) {
 //        vector<pair<Alignment , unsigned int >> p_v;
 //        vector<pair<Alignment , unsigned int >> c_v;
@@ -333,7 +353,11 @@ int main(int argc, const char** argv){
     unsigned int read_count=0;
     int init_done=0;
     unsigned int p_total=0;
-    vector<vector<unsigned int>**> final_write(num_of_consumer);
+
+    //按照染色体分好的数组
+    auto final_write=(vector<unsigned int>***)malloc(sizeof(vector<unsigned int>**)*num_of_consumer);
+
+
 #pragma omp parallel sections num_threads(3)
     {
         //初始化读入内存
@@ -437,7 +461,9 @@ int main(int argc, const char** argv){
                 current_n=toN;
                 //不再有新的，处理完剩余的退出
             }
-            range_per_thread = ceil(static_cast<double>(total_read_count)/ static_cast<double>(num_of_consumer));
+
+
+
             #pragma omp atomic write seq_cst
             read_done= true;
         }
@@ -446,13 +472,15 @@ int main(int argc, const char** argv){
             #pragma omp parallel num_threads(num_of_consumer) reduction(+:dedupedCount,avgUMICount,alignPosCount) reduction(max:maxUMICount)
             {
                 int id = omp_get_thread_num();
-                //提前分组，便于排序
-                vector<unsigned int >**  local_sort_chunk=(vector<unsigned int >**) malloc(sizeof (vector<unsigned int >*)*num_of_consumer);
-                for (int i = 0; i < num_of_consumer; ++i) {
-                    local_sort_chunk[i]=new vector<unsigned int >();
+                //将每个alignment 下面的所有位置索引存储起来,并提前分组
+                auto* local_sort_Alignment=(vector<unsigned int>**)malloc(sizeof(vector<unsigned int>**)*25);
+                for (int i = 0; i < 25; ++i) {
+                    local_sort_Alignment[i] = new vector<unsigned int>;
                 }
+
 //                cout<<id<<" begin"<<endl;
                 unordered_map<laoyaoAlignment, unordered_map<umi_type, ReadFreq *>> local_align;
+
                 unordered_map<laoyaoAlignment, unordered_map<umi_type, adj_type>> align_adjs;
                 vector<unsigned int> poses;
                 vector<pair<laoyaoAlignment , unsigned int >> process_data;
@@ -469,6 +497,7 @@ int main(int argc, const char** argv){
                     } else {
                         usleep(100);
                     }
+
                     if (read_done) {
                         //再一次执行，确保处理完全
                         if (consumer_flags[id]) {
@@ -482,18 +511,24 @@ int main(int argc, const char** argv){
                         break;
                     }
                 }
+
 //                vector<unsigned int> dedupeds;
                 //处理完成进入后处理阶段
                 for (auto &tackle_map: align_adjs) {
 
                     unordered_map<umi_type, ReadFreq *> umi_read = local_align[tackle_map.first];
+
                     vector<pair<umi_type, ReadFreq *>> freqs(umi_read.begin(), umi_read.end());
+                    //本地当前的alignemnt
+                    laoyaoAlignment current_aligment=tackle_map.first;
+
 //
                     sort(freqs.begin(), freqs.end(),
                          [](const pair<umi_type, ReadFreq *> &a, const pair<umi_type, ReadFreq *> &b) {
                              return a.second->freq > b.second->freq;  // 降序排序
                          }
                     );
+
                     unordered_map<umi_type, adj_type> umiMap = tackle_map.second;
                     //再次删除,根据freq删除
                     for (auto &umi_adjs: umiMap) {
@@ -509,20 +544,33 @@ int main(int argc, const char** argv){
                         to_remove.erase(new_end, to_remove.end());
                     }
                     unordered_set<umi_type> visited;
+
+                    //存储这个alignment下的所有结果
+                    auto the_rest_of_alignment=new vector<unsigned int>;
                     for (const auto &freq: freqs) {
+
                         if (visited.count(freq.first) == 0) {
                             visitAndRemoveV2(freq.first, umiMap, visited);
-                            //放入对应分块
-                            local_sort_chunk[get_bucket_index(freq.second->b)]->push_back(freq.second->b);
+                            //放入bed
+                            the_rest_of_alignment->emplace_back(freq.second->b);
+                            // local_sort_chunk[get_bucket_index(freq.second->b)]->push_back(freq.second->b);
                             dedupedCount++;
                         }
                     }
+
+                    if (current_aligment.tid>23) {
+                        local_sort_Alignment[24]->insert(local_sort_Alignment[24]->end(),the_rest_of_alignment->begin(), the_rest_of_alignment->end());
+                    }else {
+                        local_sort_Alignment[current_aligment.tid]->insert(local_sort_Alignment[current_aligment.tid]->end(),the_rest_of_alignment->begin(), the_rest_of_alignment->end());
+                    }
+
                     avgUMICount += umi_read.size();
                     maxUMICount = std::max(maxUMICount, (unsigned int) umi_read.size());
 
                     //开始写入
                 }
-                final_write[id]=local_sort_chunk;
+                //将本地分组结果写入
+                final_write[id]=local_sort_Alignment;
 
             }
         }
@@ -531,45 +579,49 @@ int main(int argc, const char** argv){
 
     cout<<"unmapped number:"<<unmapped<<endl;
     cout<<"map is over"<<" current time:"<<omp_get_wtime()-start_time<<endl;
-    auto thread_offset= (unsigned long*)malloc(num_of_consumer*sizeof (unsigned long));
-    auto thread_sort=(unsigned int**)malloc(num_of_consumer*sizeof (unsigned int*));
+
+
+
+    auto merged_positions=(vector<unsigned int>**)malloc(sizeof(vector<unsigned int>*) * 25);;
+
     // 预计算总元素数以优化内存分配
-    #pragma omp parallel
+    #pragma omp parallel num_threads(25)
     {
-        int id = omp_get_thread_num();
-        vector<unsigned int>local_chunk;
-        unsigned long total_size=0;
-        //获取大小
+
+        int tid = omp_get_thread_num();
+        if (tid == 0) {
+            cout<<" tid 0000000000000000"<<endl;
+        }
+        auto current_pos=new vector<unsigned int>;
         for (int i = 0; i < num_of_consumer; ++i) {
-            total_size+=final_write[i][id]->size();
+            current_pos->insert(current_pos->end(),final_write[i][tid]->begin(), final_write[i][tid]->end());
         }
-        auto* final_array=(unsigned int*) malloc(sizeof(unsigned int)*total_read_count);
-        unsigned long offset=0;
-        //归并vector
-        for (int i = 0; i < num_of_consumer; ++i) {
-            memcpy(&final_array[offset],final_write[i][id]->data(),final_write[i][id]->size()* sizeof(unsigned int));
-            offset+=final_write[i][id]->size();
+        if (tid<24) {
+            sort(current_pos->begin(), current_pos->end(),
+            [](unsigned int i1, unsigned int i2) {
+            // 内联优化版比较逻辑
+                const bam1_t* a = getBam1_t(i1);
+                const bam1_t* b = getBam1_t(i2);
+            // 优化分支预测顺序
+                return (a->core.pos != b->core.pos) ? (a->core.pos < b->core.pos) :
+                    (bam_is_rev(a) < bam_is_rev(b));
+                });
+        }else {
+            sort(current_pos->begin(), current_pos->end(),
+            [](unsigned int i1, unsigned int i2) {
+                // 内联优化版比较逻辑
+                    const bam1_t* a = getBam1_t(i1);
+                    const bam1_t* b = getBam1_t(i2);
+                // 优化分支预测顺序
+                    return (a->core.tid != b->core.tid) ? (a->core.tid < b->core.tid) :
+                   (a->core.pos != b->core.pos) ? (a->core.pos < b->core.pos) :
+                   (bam_is_rev(a) < bam_is_rev(b));
+            });
         }
+        merged_positions[tid]=current_pos;
 
-        sort(final_array,final_array+total_size);
-
-        thread_offset[id]=total_size;
-        thread_sort[id]=final_array;
-    }
-    auto merge=(unsigned int*) malloc(dedupedCount*sizeof (unsigned int ));
-    unsigned long offset=0;
-    for (int i = 0; i < num_of_consumer; ++i) {
-        memcpy(&merge[offset],thread_sort[i],thread_offset[i]* sizeof(unsigned int));
-        offset+=thread_offset[i];
-    }
-    for (int i = 1; i < offset; ++i) {
-        if(merge[i]<merge[i-1]){
-            cout<<"error"<<i<<endl;
-        }
     }
 
-    // 预分配空间
-//    std::vector<unsigned int> merged;
 
 
 
@@ -577,59 +629,32 @@ int main(int argc, const char** argv){
 
     std::string base_output_path = outputFilePath; //argument 2
 
-
     string outputPath=base_output_path;
-    cout<<"merge done start to write:"<<offset<<" current time:"<<omp_get_wtime()-start_time<<endl;
+    // cout<<"merge done start to write:"<<offset<<" current time:"<<omp_get_wtime()-start_time<<endl;
     //对0号
     int case_name=0;
-    int32_t tid= getBam1_t(merge[0])->core.tid;
+
     outputPath = base_output_path;
-    int laoyaoStart = 0;
 
-    for (int i = 0; i <dedupedCount ; ++i) {
-        bam1_t* t1=getBam1_t(merge[i]);
-        
-        if (t1->core.tid!=tid){
+    for (int i = 0; i <25 ; ++i) {
 
-            tid=t1->core.tid;
-            string r_name=string(bam_header->target_name[t1->core.tid]);
+        //必须在这里提交任务
+        h3tThreadPool.enqueue([merged_positions, i, outputPath, case_name](){
+            hisat_3n_table(merged_positions[i]->data(), 0, merged_positions[i]->size()-1, outputPath + "unfiltered_unique." + "part" + to_string(case_name+1) + ".tsv", true, false, false);
+        });
+        h3tThreadPool.enqueue([merged_positions, i, outputPath, case_name](){
+            hisat_3n_table(merged_positions[i]->data(), 0, merged_positions[i]->size()-1, outputPath + "unfiltered_multi." + "part" + to_string(case_name+1) + ".tsv", false, true, false);
+        });
+        h3tThreadPool.enqueue([merged_positions, i, outputPath, case_name](){
+            hisat_3n_table(merged_positions[i]->data(), 0, merged_positions[i]->size()-1, outputPath + "filtered_unique." + "part" + to_string(case_name+1) + ".tsv", true, false, true);
+        });
+        h3tThreadPool.enqueue([merged_positions, i, outputPath, case_name](){
+            hisat_3n_table(merged_positions[i]->data(), 0, merged_positions[i]->size()-1, outputPath + "filtered_multi." + "part" + to_string(case_name+1) +  ".tsv", false, true, true);
+        });
+        case_name++;
 
-            if (r_name.size()>3){
-                continue;
-            }
-            //必须在这里提交任务
-            h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath, case_name](){
-                hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "unfiltered_unique." + "part" + to_string(case_name+1) + ".tsv", true, false, false);
-            });
-            h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath, case_name](){
-                hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "unfiltered_multi." + "part" + to_string(case_name+1) + ".tsv", false, true, false);
-            });
-            h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath, case_name](){
-                hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "filtered_unique." + "part" + to_string(case_name+1) + ".tsv", true, false, true);
-            });
-            h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath, case_name](){
-                hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "filtered_multi." + "part" + to_string(case_name+1) +  ".tsv", false, true, true);
-            });
-            case_name++;
-            laoyaoStart = i;
 
-            
-        } 
     }
-
-    int i = dedupedCount;
-    h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath, case_name](){
-        hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "unfiltered_unique." + "part" + to_string(case_name+1) + ".tsv", true, false, false);
-    });
-    h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath, case_name](){
-        hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "unfiltered_multi." + "part" + to_string(case_name+1) + ".tsv", false, true, false);
-    });
-    h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath, case_name](){
-        hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "filtered_unique." + "part" + to_string(case_name+1) + ".tsv", true, false, true);
-    });
-    h3tThreadPool.enqueue([merge, laoyaoStart, i, outputPath, case_name](){
-        hisat_3n_table(merge, laoyaoStart, i - 1, outputPath + "filtered_multi." + "part" + to_string(case_name+1) +  ".tsv", false, true, true);
-    });
 
     h3tThreadPool.stop_pool();
 
@@ -692,7 +717,7 @@ unsigned int produceChunk(sam_hdr_t *bam_header,unsigned int chunk_n,unsigned in
         //获取这条记录的位置
         laoyaoAlignment alignment{readNegativeFlag,
                             (readNegativeFlag ? get_unclipped_end(b) : get_unclipped_start(b)),
-                            get_reference_name(b, bam_header)};
+                            b->core.tid};
         unsigned long pos_hash= getHash(alignment)%num_of_consumer;
         consumer_local_datas[pos_hash]->emplace_back(alignment,chunk_n*CHUNK_SIZE+p_read_count);
         local_read_counts++;

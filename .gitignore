@@ -1,2 +1,5 @@
 cmake-build-debug
 build
+./cmake-build-release
+./cmake-build-debug-mingw
+Makefile
