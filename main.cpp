@@ -53,6 +53,7 @@ bool save_memory= false; //-save
 char sep='_';
 //a,c,g,t之间的编码不同的位数都是2
 const int ENCODING_DIST=2;
+int thread_pool_num = 0;
 string refFileName;
 
 bool filter_rlen= false; //rlen
@@ -202,6 +203,7 @@ static struct option long_options[] {
     {"filter", no_argument, 0, 'f'},
     {"save-memory", no_argument, 0, 's'},
     {"ref", required_argument, 0, 'r' },
+    {"thread-pool", required_argument, 0, 'z'},
     {0, 0, 0, 0}
 };
 
@@ -267,7 +269,10 @@ static void parseOption(int next_option, const char *optarg) {
             refFileName = optarg;
             break;
         }
-
+        case 'z': {
+            thread_pool_num = stoi(optarg);
+            break;
+        }
         default:
             cout << "please check the arguments" << endl;
             throw 1;
@@ -573,7 +578,8 @@ int main(int argc, const char** argv){
 
 
 
-    ThreadPool h3tThreadPool(60);
+    
+    ThreadPool h3tThreadPool(thread_pool_num);
 
     std::string base_output_path = outputFilePath; //argument 2
 
