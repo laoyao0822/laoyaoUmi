@@ -53,7 +53,7 @@ bool save_memory= false; //-save
 char sep='_';
 //a,c,g,t之间的编码不同的位数都是2
 const int ENCODING_DIST=2;
-int thread_pool_num = 0;
+int thread_pool_num = 60;  //线程池大小，默认为60
 string refFileName;
 
 bool filter_rlen= false; //rlen
@@ -567,17 +567,6 @@ int main(int argc, const char** argv){
         memcpy(&merge[offset],thread_sort[i],thread_offset[i]* sizeof(unsigned int));
         offset+=thread_offset[i];
     }
-    for (int i = 1; i < offset; ++i) {
-        if(merge[i]<merge[i-1]){
-            cout<<"error"<<i<<endl;
-        }
-    }
-
-    // 预分配空间
-//    std::vector<unsigned int> merged;
-
-
-
     
     ThreadPool h3tThreadPool(thread_pool_num);
 
@@ -618,8 +607,6 @@ int main(int argc, const char** argv){
             });
             case_name++;
             laoyaoStart = i;
-
-            
         } 
     }
 
@@ -654,28 +641,6 @@ int main(int argc, const char** argv){
 //    }
     cout<<"close and destroy,cost time:"<<omp_get_wtime()-start_time<<endl;
     exit(0);
-//    bam_destroy1(b);
-    #pragma omp parallel for schedule(dynamic) num_threads(num_of_hts)
-    for (int i = 0; i < chunk_N; ++i) {
-        unsigned int last=CHUNK_SIZE;
-        if (i==CHUNK_SIZE-1){
-            last=total_read_count%CHUNK_SIZE;
-        }
-        bam1_t ** to_destroy=b_array[i];
-        for (int j = 0; j < last; ++j) {
-            if (!save_memory) {
-                bam_destroy1(to_destroy[j]);
-            } else {
-                if (to_destroy[i] != nullptr) {
-                    bam_destroy1(to_destroy[j]);
-                }
-            }
-        }
-        free(to_destroy);
-    }
-//    free(b_array);
-    return 0;
-//    hts_idx_destroy();
 }
 /**
  * 根据alignment分发数据
