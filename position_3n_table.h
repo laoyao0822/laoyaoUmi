@@ -5,6 +5,10 @@
 #include <thread>
 #include <cassert>
 #include "alignment_3n_table.h"
+
+
+extern ifstream refFile;
+extern ChromosomeFilePositions chromosomePos;
 /**
  * store unique information for one base information with readID, and the quality.
  */
@@ -183,9 +187,8 @@ public:
 class Positions
 {
 public:
-    ifstream refFile;
+    ifstream PositionsRefFile;
     // 全局变量
-    ChromosomeFilePositions chromosomePos; // 存储染色体名称及其在文件中的流位置。用于快速在文件中查找新的染色体。
     long long int refCoveredPosition;      // 这是我们加载到refPositions中的参考染色体的最后位置。
     long long int location;                // 当前在参考染色体中的位置
     ostream *out_ = &cout;
@@ -248,59 +251,11 @@ public:
         return true;
     }
 
-    /**
-     * given reference line (start with '>'), extract the chromosome information.
-     * this is important when there is space in chromosome name. the SAM information only contain the first word.
-     */
-    string getChrName(string &inputLine)
-    {
-        string name;
-        for (int i = 1; i < inputLine.size(); i++)
-        {
-            char c = inputLine[i];
-            if (isspace(c))
-            {
-                break;
-            }
-            name += c;
-        }
-
-        // if (removedChrName)
-        // {
-        //     if (name.find("chr") == 0)
-        //     {
-        //         name = name.substr(3);
-        //     }
-        // }
-        // else if (addedChrName)
-        // {
-        //     if (name.find("chr") != 0)
-        //     {
-        //         name = string("chr") + name;
-        //     }
-        // }
-        return name;
-    }
 
     /**
      * Scan the reference file. Record each chromosome and its position in file.
      */
-    void LoadChromosomeNamesPos()
-    {
-        string line;
-        while (refFile.good())
-        {
-            getline(refFile, line);
-            if (line.front() == '>')
-            { // this line is chromosome name
-                chromosome = getChrName(line);
-                streampos currentPos = refFile.tellg();
-                chromosomePos.append(chromosome, currentPos);
-            }
-        }
-        chromosomePos.sort();
-        chromosome.clear();
-    }
+    
 
     void outputFunction(Position *pos)
     {
@@ -406,17 +361,17 @@ public:
 
     void loadNewChromosome(string targetChromosome)
     {
-        refFile.clear();
+        PositionsRefFile.clear();
         // find the start position in file based on chromosome name.
         streampos startPos = chromosomePos.getChromosomePosInRefFile(targetChromosome);
         chromosome = targetChromosome;
-        refFile.seekg(startPos, ios::beg);
+        PositionsRefFile.seekg(startPos, ios::beg);
         refCoveredPosition = 2 * loadingBlockSize;
         string line;
         location = 0;
-        while (refFile.good())
+        while (PositionsRefFile.good())
         {
-            getline(refFile, line);
+            getline(PositionsRefFile, line);
             if (line.front() == '>')
             {           // this line is chromosome name
                 return; // meet next chromosome, return it.
@@ -440,9 +395,9 @@ public:
     {
         refCoveredPosition += loadingBlockSize;
         string line;
-        while (refFile.good())
+        while (PositionsRefFile.good())
         {
-            getline(refFile, line);
+            getline(PositionsRefFile, line);
             if (line.front() == '>')
             { // meet next chromosome, return.
                 return;

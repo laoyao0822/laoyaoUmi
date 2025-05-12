@@ -55,6 +55,8 @@ char sep='_';
 const int ENCODING_DIST=2;
 int thread_pool_num = 60;  //线程池大小，默认为60
 string refFileName;
+ifstream refFile;
+ChromosomeFilePositions chromosomePos; // 存储染色体名称及其在文件中的流位置。用于快速在文件中查找新的染色体。
 
 bool filter_rlen= false; //rlen
 
@@ -121,6 +123,57 @@ namespace std {
         }
     };
 }
+
+/**
+ * given reference line (start with '>'), extract the chromosome information.
+ * this is important when there is space in chromosome name. the SAM information only contain the first word.
+ */
+string getChrName(string &inputLine)
+{
+    string name;
+    for (int i = 1; i < inputLine.size(); i++)
+    {
+        char c = inputLine[i];
+        if (isspace(c))
+        {
+            break;
+        }
+        name += c;
+    }
+
+    // if (removedChrName)
+    // {
+    //     if (name.find("chr") == 0)
+    //     {
+    //         name = name.substr(3);
+    //     }
+    // }
+    // else if (addedChrName)
+    // {
+    //     if (name.find("chr") != 0)
+    //     {
+    //         name = string("chr") + name;
+    //     }
+    // }
+    return name;
+}
+
+void LoadChromosomeNamesPos(ifstream &File)
+{
+    string line;
+    while (File.good())
+    {
+        getline(File, line);
+        if (line.front() == '>')
+        { // this line is chromosome name
+            string chromosome = getChrName(line);
+            streampos currentPos = File.tellg();
+            chromosomePos.append(chromosome, currentPos);
+        }
+    }
+    chromosomePos.sort();
+}
+
 unsigned long getHash(const laoyaoAlignment& ali){
     return (hash<bool>()(!ali.isReversed)^hash<string>()(ali.refName) ^ hash<int64_t>()(ali.pos)) ;
 }
@@ -569,6 +622,8 @@ int main(int argc, const char** argv){
     }
     
     ThreadPool h3tThreadPool(thread_pool_num);
+    refFile.open(refFileName);
+    LoadChromosomeNamesPos(refFile);
 
     std::string base_output_path = outputFilePath; //argument 2
 
@@ -625,7 +680,7 @@ int main(int argc, const char** argv){
     });
 
     h3tThreadPool.stop_pool();
-
+    refFile.close();
 
     cout<<"sum is "<<read_count<<",cost time:"<<omp_get_wtime()-start_time<<endl;
     cout<<"Number of unremoved reads\t" <<read_count<<endl;

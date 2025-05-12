@@ -48,6 +48,7 @@ extern bam1_t *getBam1_t(unsigned int index);
 
 
 
+
 void hisat_3n_table(unsigned int *merge, int laoyaoStart, int laoyaoEnd,
                    string outputFileName,
                    bool uniqueOnly, bool multipleOnly, bool needFilter)
@@ -63,8 +64,8 @@ void hisat_3n_table(unsigned int *merge, int laoyaoStart, int laoyaoEnd,
         return;
     }
 
-    positions.refFile.open(refFileName, ios_base::in); //硬编码！请注意参考文件路径
-    positions.LoadChromosomeNamesPos();
+    positions.PositionsRefFile.open(refFileName, ios_base::in); 
+//    positions.LoadChromosomeNamesPos();
 
     string chromosome;
     int qlen, sclen;
