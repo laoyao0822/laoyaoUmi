@@ -254,6 +254,7 @@ int main(int argc,char *argv[]){
                 }
             }
         }
+
         //
         #pragma omp section
         {
@@ -442,7 +443,6 @@ int main(int argc,char *argv[]){
             cout<<"error"<<i<<endl;
         }
     }
-
     // 预分配空间
 //    std::vector<unsigned int> merged;
 
